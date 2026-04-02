@@ -1,33 +1,221 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Sphere, Box, Cylinder } from '@react-three/drei';
-import { Physics, RigidBody, CapsuleCollider } from '@react-three/rapier';
+import { Physics, RigidBody, CapsuleCollider, useRapier } from '@react-three/rapier';
 import * as THREE from 'three';
+import * as RAPIER from '@dimforge/rapier3d-compat';
+import { soundManager } from '../lib/sound';
 import { motion, AnimatePresence } from 'motion/react';
+import { Maximize, Minimize } from 'lucide-react';
+
+// --- FULLSCREEN BUTTON ---
+const FullscreenButton = ({ isInline = false }: { isInline?: boolean }) => {
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen();
+      setIsFullscreen(true);
+    } else {
+      document.exitFullscreen();
+      setIsFullscreen(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  if (isInline) {
+    return (
+      <button 
+        onClick={toggleFullscreen} 
+        className="px-8 py-4 bg-purple-600 text-white text-xl font-bold rounded-xl flex items-center justify-center gap-2"
+      >
+        {isFullscreen ? <Minimize size={24} /> : <Maximize size={24} />}
+        {isFullscreen ? 'EXIT FULLSCREEN' : 'FULLSCREEN'}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      onClick={toggleFullscreen}
+      className="absolute top-6 right-6 z-60 p-3 bg-black/50 border border-white/20 rounded-full text-white hover:bg-white/20 backdrop-blur-sm pointer-events-auto"
+    >
+      {isFullscreen ? <Minimize size={24} /> : <Maximize size={24} />}
+    </button>
+  );
+};
 
 // --- GLOBAL STATE & INPUT ---
 const inputRef = {
   move: { x: 0, y: 0 },
-  lookDelta: { x: 0, y: 0 },
+  aim: { x: 0, y: 0 },
+  mouseNDC: new THREE.Vector2(0, 0),
   isShooting: false,
+  isMobileAiming: false,
   justShot: false,
-  keys: { w: false, a: false, s: false, d: false, space: false }
+  keys: { w: false, a: false, s: false, d: false, space: false, r: false, q: false, e: false },
+  abilities: { q: false, e: false }
 };
 
-const ENEMY_SPEED = 4;
-const PLAYER_SPEED = 8;
+const ENEMY_SPEED = 5;
+const PLAYER_SPEED = 12;
 const MAX_PARTICLES = 2000;
-const BULLET_SPEED = 50;
-const ENEMY_BULLET_SPEED = 25;
+const BULLET_SPEED = 40;
+const ENEMY_BULLET_SPEED = 15;
 const MAX_BULLETS = 200;
 
 const playerState = {
   pos: new THREE.Vector3(),
   health: 100,
-  takeDamage: (amount: number) => {}
+  ammo: 30,
+  maxAmmo: 30,
+  weapon: 'pistol' as 'pistol' | 'shotgun' | 'machinegun',
+  isReloading: false,
+  speedBoostEndTime: 0,
+  shieldEndTime: 0,
+  shockwaveTime: 0,
+  abilityCooldowns: { q: 0, e: 0 },
+  takeDamage: (amount: number) => {},
+  gameState: 'menu' as 'menu' | 'playing' | 'gameover' | 'paused'
 };
 
 const enemiesData = new Map<number, { pos: THREE.Vector3, takeDamage: (amount: number, hitPos: THREE.Vector3) => void }>();
+const barrelsData = new Map<number, { pos: THREE.Vector3, takeDamage: (amount: number) => void }>();
+
+const JUMP_PADS = [
+  [-40, 0.1, -40], [40, 0.1, 40], [-40, 0.1, 40], [40, 0.1, -40], [0, 0.1, -60], [0, 0.1, 60]
+];
+const SPEED_PADS = [
+  [-60, 0.1, 0], [60, 0.1, 0], [0, 0.1, -30], [0, 0.1, 30]
+];
+
+// --- MINIMAP ---
+const Minimap = () => {
+  const [enemies, setEnemies] = useState<THREE.Vector3[]>([]);
+  const [playerPos, setPlayerPos] = useState(new THREE.Vector3());
+  const [barrels, setBarrels] = useState<THREE.Vector3[]>([]);
+  
+  const jumpPads = useMemo(() => [
+    new THREE.Vector3(-40, 0, -40), new THREE.Vector3(40, 0, 40), new THREE.Vector3(-40, 0, 40), new THREE.Vector3(40, 0, -40), new THREE.Vector3(0, 0, -60), new THREE.Vector3(0, 0, 60)
+  ], []);
+  
+  const speedPads = useMemo(() => [
+    new THREE.Vector3(-60, 0, 0), new THREE.Vector3(60, 0, 0), new THREE.Vector3(0, 0, -30), new THREE.Vector3(0, 0, 30)
+  ], []);
+  
+  const teleporters = useMemo(() => [
+    new THREE.Vector3(-80, 0, -80),
+    new THREE.Vector3(80, 0, 80),
+    new THREE.Vector3(-80, 0, 80),
+    new THREE.Vector3(80, 0, -80),
+  ], []);
+
+  useEffect(() => {
+    let frameId: number;
+    const update = () => {
+      const currentEnemies: THREE.Vector3[] = [];
+      enemiesData.forEach((data) => {
+        currentEnemies.push(data.pos.clone());
+      });
+      setEnemies(currentEnemies);
+
+      const currentBarrels: THREE.Vector3[] = [];
+      barrelsData.forEach((data) => {
+        currentBarrels.push(data.pos.clone());
+      });
+      setBarrels(currentBarrels);
+
+      setPlayerPos(playerState.pos.clone());
+      frameId = requestAnimationFrame(update);
+    };
+    update();
+    return () => cancelAnimationFrame(frameId);
+  }, []);
+
+  const mapSize = 100;
+  const arenaSize = 200;
+  const scale = mapSize / arenaSize;
+
+  const toMapCoord = (v: THREE.Vector3) => ({
+    x: (v.x + arenaSize / 2) * scale,
+    y: (v.z + arenaSize / 2) * scale,
+  });
+
+  return (
+    <div className="absolute bottom-20 right-6 z-30 pointer-events-none">
+      <div 
+        className="relative bg-black/40 border-2 border-white/10 rounded-xl backdrop-blur-sm overflow-hidden shadow-[0_0_20px_rgba(0,0,0,0.5)]"
+        style={{ width: mapSize, height: mapSize }}
+      >
+        {/* Grid lines */}
+        <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'linear-gradient(#fff 1px, transparent 1px), linear-gradient(90deg, #fff 1px, transparent 1px)', backgroundSize: '15px 15px' }} />
+        
+        {/* Teleporters */}
+        {teleporters.map((t, i) => {
+          const pos = toMapCoord(t);
+          return (
+            <div 
+              key={i} 
+              className="absolute w-1.5 h-1.5 bg-cyan-400 rounded-full -translate-x-1/2 -translate-y-1/2 animate-pulse shadow-[0_0_8px_#00ffff]"
+              style={{ left: pos.x, top: pos.y }}
+            />
+          );
+        })}
+
+        {/* Jump Pads */}
+        {jumpPads.map((t, i) => {
+          const pos = toMapCoord(t);
+          return <div key={`jp-${i}`} className="absolute w-1.5 h-1.5 bg-orange-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
+        })}
+
+        {/* Speed Pads */}
+        {speedPads.map((t, i) => {
+          const pos = toMapCoord(t);
+          return <div key={`sp-${i}`} className="absolute w-1.5 h-1.5 bg-green-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
+        })}
+
+        {/* Barrels */}
+        {barrels.map((b, i) => {
+          const pos = toMapCoord(b);
+          return <div key={`b-${i}`} className="absolute w-1.5 h-1.5 bg-orange-500 rounded-full -translate-x-1/2 -translate-y-1/2 opacity-80" style={{ left: pos.x, top: pos.y }} />
+        })}
+
+        {/* Enemies */}
+        {enemies.map((e, i) => {
+          const pos = toMapCoord(e);
+          return (
+            <div 
+              key={i} 
+              className="absolute w-1 h-1 bg-red-500 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-[0_0_5px_#ff0000]"
+              style={{ left: pos.x, top: pos.y }}
+            />
+          );
+        })}
+
+        {/* Player */}
+        {(() => {
+          const pos = toMapCoord(playerPos);
+          return (
+            <div 
+              className="absolute w-2 h-2 bg-green-400 rounded-full -translate-x-1/2 -translate-y-1/2 z-10 shadow-[0_0_10px_#00ff00]"
+              style={{ left: pos.x, top: pos.y }}
+            >
+               <div className="absolute inset-0 bg-green-400 rounded-full animate-ping opacity-50" />
+            </div>
+          );
+        })()}
+      </div>
+      <div className="mt-1 text-right font-mono text-[7px] text-white/20 tracking-[0.1em] uppercase font-bold">RADAR v1.1</div>
+    </div>
+  );
+};
 
 // --- BULLET SYSTEM ---
 class Bullet {
@@ -36,10 +224,12 @@ class Bullet {
   active = false;
   isPlayer = false;
   life = 0;
+  damage = 35;
+  scale = 1;
 }
 const bullets = Array.from({ length: MAX_BULLETS }, () => new Bullet());
 
-const spawnBullet = (pos: THREE.Vector3, dir: THREE.Vector3, speed: number, isPlayer: boolean) => {
+const spawnBullet = (pos: THREE.Vector3, dir: THREE.Vector3, speed: number, isPlayer: boolean, damage: number = 35, scale: number = 1) => {
   const b = bullets.find(b => !b.active);
   if (b) {
     b.pos.copy(pos);
@@ -47,6 +237,8 @@ const spawnBullet = (pos: THREE.Vector3, dir: THREE.Vector3, speed: number, isPl
     b.active = true;
     b.isPlayer = isPlayer;
     b.life = 0;
+    b.damage = damage;
+    b.scale = scale;
   }
 };
 
@@ -54,40 +246,57 @@ const BulletManager = ({ bloodSystem }: any) => {
   const playerMeshRef = useRef<THREE.InstancedMesh>(null);
   const enemyMeshRef = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
+  const { world } = useRapier();
 
   useFrame((state, delta) => {
-    if (!playerMeshRef.current || !enemyMeshRef.current) return;
+    if (!playerMeshRef.current || !enemyMeshRef.current || playerState.gameState !== 'playing') return;
     
     let playerCount = 0;
     let enemyCount = 0;
 
     bullets.forEach((b) => {
       if (b.active) {
+        const oldPos = b.pos.clone();
         b.pos.addScaledVector(b.vel, delta);
         b.life += delta;
         
         let hit = false;
         
-        // Floor/Wall basic collision (y < 0 or too far)
-        if (b.pos.y < -0.5 || b.pos.y > 20 || b.pos.x < -50 || b.pos.x > 50 || b.pos.z < -50 || b.pos.z > 50) {
+        // Raycast for collision
+        const ray = new RAPIER.Ray(oldPos, b.vel.clone().normalize());
+        const hitInfo = world.castRay(ray, b.vel.length() * delta, true);
+        if (hitInfo) {
+          hit = true;
+        }
+        
+        // Floor/Wall basic collision (Updated for larger arena)
+        if (!hit && (b.pos.y < -0.5 || b.pos.y > 40 || b.pos.x < -100 || b.pos.x > 100 || b.pos.z < -100 || b.pos.z > 100)) {
           hit = true;
         }
         
         if (!hit && b.isPlayer) {
-          // Check enemies
           for (const [id, enemy] of enemiesData.entries()) {
-            if (b.pos.distanceToSquared(enemy.pos) < 2.0) { // Hit radius
-              enemy.takeDamage(35, b.pos);
+            if (b.pos.distanceToSquared(enemy.pos) < 2.0) {
+              enemy.takeDamage(b.damage, b.pos);
               hit = true;
               break;
             }
           }
         } else if (!hit && !b.isPlayer) {
-          // Check player
           if (b.pos.distanceToSquared(playerState.pos) < 1.5) {
             playerState.takeDamage(10);
             bloodSystem.current?.emit(b.pos, 10);
             hit = true;
+          }
+        }
+
+        if (!hit) {
+          for (const [id, barrel] of barrelsData.entries()) {
+            if (b.pos.distanceToSquared(barrel.pos) < 2.5) {
+              barrel.takeDamage(35);
+              hit = true;
+              break;
+            }
           }
         }
         
@@ -98,7 +307,8 @@ const BulletManager = ({ bloodSystem }: any) => {
         if (b.active) {
           dummy.position.copy(b.pos);
           dummy.lookAt(b.pos.x + b.vel.x, b.pos.y + b.vel.y, b.pos.z + b.vel.z);
-          dummy.scale.set(0.15, 0.15, 2.0); // Tracer shape
+          const s = b.scale || 1;
+          dummy.scale.set(0.15 * s, 0.15 * s, 2.0 * s);
           dummy.updateMatrix();
           
           if (b.isPlayer) {
@@ -110,17 +320,8 @@ const BulletManager = ({ bloodSystem }: any) => {
       }
     });
 
-    // Hide unused instances
-    dummy.position.set(0, -100, 0);
-    dummy.scale.set(0, 0, 0);
-    dummy.updateMatrix();
-    
-    for (let i = playerCount; i < MAX_BULLETS; i++) {
-      playerMeshRef.current!.setMatrixAt(i, dummy.matrix);
-    }
-    for (let i = enemyCount; i < MAX_BULLETS; i++) {
-      enemyMeshRef.current!.setMatrixAt(i, dummy.matrix);
-    }
+    playerMeshRef.current.count = playerCount;
+    enemyMeshRef.current.count = enemyCount;
 
     playerMeshRef.current.instanceMatrix.needsUpdate = true;
     enemyMeshRef.current.instanceMatrix.needsUpdate = true;
@@ -205,7 +406,8 @@ const BloodParticles = React.forwardRef((props, ref) => {
 
   useFrame((state, delta) => {
     if (!meshRef.current) return;
-    particles.forEach((p, i) => {
+    let activeCount = 0;
+    particles.forEach((p) => {
       if (p.active) {
         p.update(delta);
         dummy.position.copy(p.pos);
@@ -216,13 +418,10 @@ const BloodParticles = React.forwardRef((props, ref) => {
            dummy.scale.setScalar(1);
         }
         dummy.updateMatrix();
-        meshRef.current!.setMatrixAt(i, dummy.matrix);
-      } else {
-        dummy.position.set(0, -100, 0);
-        dummy.updateMatrix();
-        meshRef.current!.setMatrixAt(i, dummy.matrix);
+        meshRef.current!.setMatrixAt(activeCount++, dummy.matrix);
       }
     });
+    meshRef.current.count = activeCount;
     meshRef.current.instanceMatrix.needsUpdate = true;
   });
 
@@ -234,95 +433,271 @@ const BloodParticles = React.forwardRef((props, ref) => {
   );
 });
 
-// --- EPIC MAP ---
-const EpicMap = () => {
+// --- TELEPORTER ---
+const Teleporter = ({ position, target, onTeleport }: any) => {
   return (
-    <group>
-      {/* Main Floor */}
-      <RigidBody type="fixed" position={[0, -0.5, 0]}>
-        <Box args={[100, 1, 100]} receiveShadow>
-          <meshStandardMaterial color="#3a3a4c" roughness={0.8} metalness={0.2} />
-        </Box>
-      </RigidBody>
-      
-      {/* Central Platform */}
-      <RigidBody type="fixed" position={[0, 0.5, 0]}>
-        <Cylinder args={[10, 12, 2, 32]} receiveShadow castShadow>
-          <meshStandardMaterial color="#4a4a5c" roughness={0.7} metalness={0.4} />
+    <group position={position}>
+      <RigidBody
+        type="fixed"
+        sensor
+        onIntersectionEnter={({ other }) => {
+          if (other.rigidBodyObject?.userData?.isPlayer) {
+            onTeleport(target);
+          }
+        }}
+      >
+        <Cylinder args={[1.5, 1.5, 0.2, 32]}>
+          <meshStandardMaterial color="#00ffff" emissive="#00ffff" emissiveIntensity={2} transparent opacity={0.6} />
+        </Cylinder>
+        <Cylinder args={[1.6, 1.6, 0.1, 32]} position={[0, -0.05, 0]}>
+          <meshStandardMaterial color="#333" />
         </Cylinder>
       </RigidBody>
+    </group>
+  );
+};
 
-      {/* Ramps */}
-      <RigidBody type="fixed" position={[0, 0.75, 14.5]} rotation={[0.149, 0, 0]} friction={0}>
-        <Box args={[6, 0.5, 10]} receiveShadow castShadow>
-          <meshStandardMaterial color="#5a5a6c" roughness={0.7} metalness={0.4} />
+// --- JUMP PAD ---
+const JumpPad = ({ position }: any) => {
+  return (
+    <group position={position}>
+      <RigidBody
+        type="fixed"
+        sensor
+        onIntersectionEnter={({ other }) => {
+          if (other.rigidBodyObject?.userData?.isPlayer) {
+            const body = other.rigidBody as any;
+            if (body && body.linvel) {
+              const vel = body.linvel();
+              body.setLinvel({ x: vel.x, y: 25, z: vel.z }, true);
+              soundManager.playShoot(); // Reuse shoot sound or add a jump sound
+            }
+          }
+        }}
+      >
+        <Box args={[3, 0.2, 3]}>
+          <meshStandardMaterial color="#ffaa00" emissive="#ffaa00" emissiveIntensity={1} />
         </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[14.5, 0.75, 0]} rotation={[0, 0, -0.149]} friction={0}>
-        <Box args={[10, 0.5, 6]} receiveShadow castShadow>
-          <meshStandardMaterial color="#5a5a6c" roughness={0.7} metalness={0.4} />
-        </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[0, 0.75, -14.5]} rotation={[-0.149, 0, 0]} friction={0}>
-        <Box args={[6, 0.5, 10]} receiveShadow castShadow>
-          <meshStandardMaterial color="#5a5a6c" roughness={0.7} metalness={0.4} />
-        </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[-14.5, 0.75, 0]} rotation={[0, 0, 0.149]} friction={0}>
-        <Box args={[10, 0.5, 6]} receiveShadow castShadow>
-          <meshStandardMaterial color="#5a5a6c" roughness={0.7} metalness={0.4} />
-        </Box>
-      </RigidBody>
-
-      {/* Pillars with Neon */}
-      {[-20, 20].map(x => 
-        [-20, 20].map(z => (
-          <RigidBody key={`${x}-${z}`} type="fixed" position={[x, 5, z]}>
-            <Box args={[4, 10, 4]} receiveShadow castShadow>
-              <meshStandardMaterial color="#2a2a38" roughness={0.9} metalness={0.8} />
-            </Box>
-            {/* Neon accent */}
-            <Box args={[4.2, 0.5, 4.2]} position={[0, 3, 0]}>
-              <meshBasicMaterial color="#ff0055" toneMapped={false} />
-            </Box>
-            <pointLight position={[0, 3, 0]} color="#ff0055" intensity={2} distance={15} />
-          </RigidBody>
-        ))
-      )}
-
-      {/* Boundary Walls */}
-      <RigidBody type="fixed" position={[0, 5, -50]}>
-        <Box args={[100, 10, 2]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
-        </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[0, 5, 50]}>
-        <Box args={[100, 10, 2]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
-        </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[-50, 5, 0]}>
-        <Box args={[2, 10, 100]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
-        </Box>
-      </RigidBody>
-      <RigidBody type="fixed" position={[50, 5, 0]}>
-        <Box args={[2, 10, 100]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+        <Box args={[3.2, 0.1, 3.2]} position={[0, -0.05, 0]}>
+          <meshStandardMaterial color="#333" />
         </Box>
       </RigidBody>
     </group>
   );
 };
 
+// --- SPEED PAD ---
+const SpeedPad = ({ position }: any) => {
+  return (
+    <group position={position}>
+      <RigidBody
+        type="fixed"
+        sensor
+        onIntersectionEnter={({ other }) => {
+          if (other.rigidBodyObject?.userData?.isPlayer) {
+            playerState.speedBoostEndTime = performance.now() + 3000;
+            soundManager.playShoot(); // Reuse sound
+          }
+        }}
+      >
+        <Box args={[3, 0.2, 3]}>
+          <meshStandardMaterial color="#00ff00" emissive="#00ff00" emissiveIntensity={1} />
+        </Box>
+        <Box args={[3.2, 0.1, 3.2]} position={[0, -0.05, 0]}>
+          <meshStandardMaterial color="#333" />
+        </Box>
+      </RigidBody>
+    </group>
+  );
+};
+
+// --- EXPLOSIVE BARREL ---
+const ExplosiveBarrel = ({ id, position, bloodSystem }: any) => {
+  const [health, setHealth] = useState(30);
+  const [exploded, setExploded] = useState(false);
+  const posVec = useMemo(() => new THREE.Vector3(...position), [position]);
+
+  useEffect(() => {
+    if (exploded) return;
+    const takeDamage = (amount: number) => {
+      setHealth(h => h - amount);
+    };
+    barrelsData.set(id, { pos: posVec, takeDamage });
+    return () => { barrelsData.delete(id); };
+  }, [id, posVec, exploded]);
+
+  useEffect(() => {
+    if (health <= 0 && !exploded) {
+      setExploded(true);
+      barrelsData.delete(id);
+      soundManager.playEnemyDie(); // Reuse explosion-like sound
+      bloodSystem.current?.emit(posVec, 100); // Visual explosion
+
+      // Damage player
+      if (playerState.pos.distanceTo(posVec) < 12) {
+        playerState.takeDamage(40);
+      }
+      // Damage enemies
+      for (const [enemyId, enemy] of enemiesData.entries()) {
+        if (enemy.pos.distanceTo(posVec) < 12) {
+          enemy.takeDamage(150, enemy.pos);
+        }
+      }
+    }
+  }, [health, exploded, id, posVec, bloodSystem]);
+
+  if (exploded) return null;
+
+  return (
+    <RigidBody type="dynamic" position={position} mass={2}>
+      <Cylinder args={[0.8, 0.8, 2, 16]}>
+        <meshStandardMaterial color="#ff3300" roughness={0.6} metalness={0.3} />
+      </Cylinder>
+    </RigidBody>
+  );
+};
+
+// --- ARENA MAP ---
+const Arena = ({ onTeleport, bloodSystem }: any) => {
+  const obstacles = useMemo(() => {
+    const obs = [];
+    const seed = 12345;
+    const pseudoRandom = (s: number) => {
+      const x = Math.sin(s) * 10000;
+      return x - Math.floor(x);
+    };
+
+    for (let i = 0; i < 15; i++) {
+      const x = (pseudoRandom(seed + i * 13) - 0.5) * 180;
+      const z = (pseudoRandom(seed + i * 17) - 0.5) * 180;
+      if (Math.abs(x) < 15 && Math.abs(z) < 15) continue; // Keep spawn clear
+      
+      const type = pseudoRandom(seed + i * 19) > 0.5 ? 'box' : 'cylinder';
+      const w = 4 + pseudoRandom(seed + i * 23) * 8;
+      const h = 2 + pseudoRandom(seed + i * 29) * 4;
+      const d = 4 + pseudoRandom(seed + i * 31) * 8;
+      
+      obs.push({ x, z, type, w, h, d });
+    }
+    return obs;
+  }, []);
+
+  const barrels = useMemo(() => {
+    return Array.from({ length: 8 }).map((_, i) => ({
+      id: i,
+      x: (Math.random() - 0.5) * 160,
+      z: (Math.random() - 0.5) * 160,
+    })).filter(b => Math.abs(b.x) > 15 || Math.abs(b.z) > 15);
+  }, []);
+
+  const jumpPads = useMemo(() => [
+    [-40, 0.1, -40],
+    [40, 0.1, 40],
+    [-40, 0.1, 40],
+    [40, 0.1, -40],
+    [0, 0.1, -60],
+    [0, 0.1, 60],
+  ], []);
+
+  const speedPads = useMemo(() => [
+    [-60, 0.1, 0],
+    [60, 0.1, 0],
+    [0, 0.1, -30],
+    [0, 0.1, 30],
+  ], []);
+
+  return (
+    <group>
+      {/* Main Floor */}
+      <RigidBody type="fixed" position={[0, -0.5, 0]} friction={0.1}>
+        <Box args={[200, 1, 200]} receiveShadow>
+          <meshStandardMaterial color="#0a0a1a" roughness={0.8} metalness={0.2} />
+        </Box>
+        <gridHelper args={[200, 100, '#ff0055', '#222244']} position={[0, 0.51, 0]} />
+      </RigidBody>
+      
+      {/* Boundary Walls */}
+      <RigidBody type="fixed" position={[0, 4, -100]}>
+        <Box args={[200, 8, 4]} receiveShadow castShadow>
+          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[0, 4, 100]}>
+        <Box args={[200, 8, 4]} receiveShadow castShadow>
+          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[-100, 4, 0]}>
+        <Box args={[4, 8, 200]} receiveShadow castShadow>
+          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[100, 4, 0]}>
+        <Box args={[4, 8, 200]} receiveShadow castShadow>
+          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+        </Box>
+      </RigidBody>
+
+      {/* Obstacles */}
+      {obstacles.map((o, i) => (
+        <RigidBody key={i} type="fixed" position={[o.x, o.h / 2, o.z]}>
+          {o.type === 'box' ? (
+            <Box args={[o.w, o.h, o.d]}>
+              <meshStandardMaterial color="#2a2a3a" />
+            </Box>
+          ) : (
+            <Cylinder args={[o.w / 2, o.w / 2, o.h, 16]}>
+              <meshStandardMaterial color="#2a2a3a" />
+            </Cylinder>
+          )}
+        </RigidBody>
+      ))}
+
+      {/* Explosive Barrels */}
+      {barrels.map(b => (
+        <ExplosiveBarrel key={`barrel-${b.id}`} id={b.id} position={[b.x, 1, b.z]} bloodSystem={bloodSystem} />
+      ))}
+
+      {/* Jump Pads */}
+      {jumpPads.map((pos, i) => (
+        <JumpPad key={`jump-${i}`} position={pos} />
+      ))}
+
+      {/* Speed Pads */}
+      {speedPads.map((pos, i) => (
+        <SpeedPad key={`speed-${i}`} position={pos} />
+      ))}
+
+      {/* Teleporters */}
+      <Teleporter position={[-80, 0.1, -80]} target={[80, 2, 80]} onTeleport={onTeleport} />
+      <Teleporter position={[80, 0.1, 80]} target={[-80, 2, -80]} onTeleport={onTeleport} />
+      <Teleporter position={[-80, 0.1, 80]} target={[80, 2, -80]} onTeleport={onTeleport} />
+      <Teleporter position={[80, 0.1, -80]} target={[-80, 2, 80]} onTeleport={onTeleport} />
+    </group>
+  );
+};
+
 // --- ENEMY ---
-const Enemy = ({ id, initialPos, onDie, bloodSystem, gameMode }: any) => {
+const Enemy = React.memo(({ id, type = 'standard', initialPos, onDie, bloodSystem, gameMode, wave }: any) => {
   const bodyRef = useRef<any>(null);
-  const [health, setHealth] = useState(100);
-  const lastShootTime = useRef(0);
+  const isDead = useRef(false);
+  
+  const stats = useMemo(() => {
+    const baseHealth = 100 + (wave - 1) * 20;
+    switch(type) {
+      case 'runner': return { health: baseHealth * 0.5, speed: ENEMY_SPEED * 1.8, color: '#00ff88', range: 1.5, damage: 15 };
+      case 'tank': return { health: baseHealth * 2.5, speed: ENEMY_SPEED * 0.6, color: '#0088ff', range: 30, damage: 25 };
+      default: return { health: baseHealth, speed: ENEMY_SPEED, color: '#8a1111', range: 25, damage: 10 };
+    }
+  }, [type, wave]);
+
+  const [health, setHealth] = useState(stats.health);
+  const lastShootTime = useRef(Math.random() * 2);
+  const lastMeleeTime = useRef(0);
 
   useEffect(() => {
     const takeDamage = (amount: number, hitPos: THREE.Vector3) => {
+      if (isDead.current) return;
       setHealth(h => {
         const newH = h - amount;
         if (newH > 0) {
@@ -331,41 +706,51 @@ const Enemy = ({ id, initialPos, onDie, bloodSystem, gameMode }: any) => {
         return newH;
       });
     };
-    enemiesData.set(id, { pos: new THREE.Vector3(...initialPos), takeDamage });
+    const push = (force: THREE.Vector3) => {
+      if (bodyRef.current) {
+        bodyRef.current.applyImpulse(force, true);
+      }
+    };
+    enemiesData.set(id, { pos: new THREE.Vector3(...initialPos), takeDamage, push } as any);
     return () => { enemiesData.delete(id); };
   }, [id, bloodSystem, initialPos]);
 
   useFrame((state, delta) => {
-    if (!bodyRef.current || health <= 0) return;
+    if (!bodyRef.current || health <= 0 || playerState.gameState !== 'playing' || isDead.current) return;
 
     try {
       const posObj = bodyRef.current.translation();
       if (!posObj || isNaN(posObj.x)) return;
-      const px = posObj.x, py = posObj.y, pz = posObj.z;
+      const currentPos = new THREE.Vector3(posObj.x, posObj.y, posObj.z);
       
-      const currentPos = new THREE.Vector3(px, py, pz);
-      
-      // Update global pos for bullets
+      if (currentPos.y < -10) {
+        isDead.current = true;
+        onDie(id, false, currentPos);
+        return;
+      }
+
       const eData = enemiesData.get(id);
       if (eData) eData.pos.copy(currentPos);
 
       const playerPos = playerState.pos;
       const distToPlayer = currentPos.distanceTo(playerPos);
-
       const dir = new THREE.Vector3().subVectors(playerPos, currentPos);
       dir.y = 0;
       
-      const speed = gameMode === 'hardcore' ? ENEMY_SPEED * 1.5 : ENEMY_SPEED;
+      const waveSpeedBonus = (wave - 1) * 0.5;
+      const speed = (stats.speed + waveSpeedBonus) * (gameMode === 'hardcore' ? 1.5 : 1);
 
-      // Stop moving if close enough to shoot
-      if (distToPlayer > 12) {
+      if (distToPlayer > stats.range * 0.8) {
         if (dir.lengthSq() > 0.001) {
           dir.normalize().multiplyScalar(speed);
         } else {
           dir.set(0, 0, 0);
         }
+      } else if (type === 'tank' && distToPlayer < 15) {
+        // Tank tries to keep distance
+        dir.normalize().multiplyScalar(-speed * 0.5);
       } else {
-        dir.set(0, 0, 0); // Stop to shoot
+        dir.set(0, 0, 0);
       }
 
       const velObj = bodyRef.current.linvel();
@@ -375,362 +760,608 @@ const Enemy = ({ id, initialPos, onDie, bloodSystem, gameMode }: any) => {
         bodyRef.current.setLinvel({ x: dir.x, y: vy, z: dir.z }, true);
       }
 
-      // Look at player
       if (distToPlayer > 0.1) {
-        const lookAtRot = new THREE.Matrix4().lookAt(
-          currentPos,
-          new THREE.Vector3(playerPos.x, py, playerPos.z),
-          new THREE.Vector3(0, 1, 0)
-        );
-        const quat = new THREE.Quaternion().setFromRotationMatrix(lookAtRot);
-        if (!isNaN(quat.x)) {
-          bodyRef.current.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w }, true);
-        }
+        const angle = Math.atan2(playerPos.x - currentPos.x, playerPos.z - currentPos.z);
+        const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+        bodyRef.current.setRotation(quat, true);
       }
 
-      // Shooting logic
-      const shootCooldown = gameMode === 'hardcore' ? 0.5 : 1.0;
-      if (distToPlayer < 20 && state.clock.elapsedTime - lastShootTime.current > shootCooldown) {
-        // Add some randomness to shooting interval
-        lastShootTime.current = state.clock.elapsedTime + Math.random() * shootCooldown; 
-        
-        const shootDir = new THREE.Vector3().subVectors(
-          new THREE.Vector3(playerPos.x, playerPos.y + 1, playerPos.z), // aim at player body
-          new THREE.Vector3(px, py + 1, pz) // shoot from enemy body
-        ).normalize();
-        
-        // Add slight inaccuracy
-        shootDir.x += (Math.random() - 0.5) * 0.1;
-        shootDir.y += (Math.random() - 0.5) * 0.1;
-        shootDir.z += (Math.random() - 0.5) * 0.1;
-        shootDir.normalize();
+      const currentTime = performance.now() / 1000;
+      // Runner Melee
+      if (type === 'runner' && distToPlayer < 2 && currentTime - lastMeleeTime.current > 1) {
+        lastMeleeTime.current = currentTime;
+        playerState.takeDamage(stats.damage);
+      }
 
-        const bulletSpeed = gameMode === 'hardcore' ? ENEMY_BULLET_SPEED * 1.5 : ENEMY_BULLET_SPEED;
-        spawnBullet(new THREE.Vector3(px, py + 1, pz).addScaledVector(shootDir, 1), shootDir, bulletSpeed, false);
+      // Shooting logic (only for non-runners)
+      if (type !== 'runner') {
+        const shootCooldown = (gameMode === 'hardcore' ? 0.6 : Math.max(0.4, 1.2 - (wave - 1) * 0.1)) * (type === 'tank' ? 2 : 1);
+        if (distToPlayer < stats.range && currentTime - lastShootTime.current > shootCooldown) {
+          lastShootTime.current = currentTime + Math.random() * 0.5; 
+          
+          const shootDir = new THREE.Vector3(playerPos.x - currentPos.x, 0, playerPos.z - currentPos.z).normalize();
+          shootDir.x += (Math.random() - 0.5) * 0.15;
+          shootDir.z += (Math.random() - 0.5) * 0.15;
+          shootDir.normalize();
+
+          const bulletSpeed = (gameMode === 'hardcore' ? ENEMY_BULLET_SPEED * 1.5 : ENEMY_BULLET_SPEED) * (type === 'tank' ? 0.7 : 1);
+          const spawnPos = currentPos.clone().addScaledVector(shootDir, 1.2).add(new THREE.Vector3(0, 0.5, 0));
+          spawnBullet(spawnPos, shootDir, bulletSpeed, false, type === 'tank' ? 25 : 10, type === 'tank' ? 2 : 1);
+          soundManager.playEnemyShoot();
+        }
       }
 
     } catch (e) {}
   });
 
   useEffect(() => {
-    if (health <= 0) {
+    if (health <= 0 && !isDead.current) {
+      isDead.current = true;
+      soundManager.playEnemyDie();
       const eData = enemiesData.get(id);
       if (eData && eData.pos) {
         bloodSystem.current?.emit(eData.pos.clone(), 150);
+        onDie(id, true, eData.pos.clone());
+      } else {
+        onDie(id, true);
       }
-      setTimeout(() => onDie(id), 50);
     }
   }, [health, id, onDie, bloodSystem]);
 
+  const healthPercent = (health / stats.health) * 100;
+
   return (
-    <RigidBody ref={bodyRef} position={initialPos} type="dynamic" enabledRotations={[false, false, false]} colliders={false}>
-      <CapsuleCollider args={[0.6, 0.3]} />
-      <group userData={{ isEnemy: true }}>
-        <Cylinder args={[0.35, 0.25, 1.2]} position={[0, 0, 0]} castShadow>
-          <meshStandardMaterial color={gameMode === 'hardcore' ? "#550088" : "#8a1111"} roughness={0.9} />
+    <RigidBody ref={bodyRef} position={initialPos} type="dynamic" enabledRotations={[false, false, false]} colliders={false} lockRotations>
+      <CapsuleCollider args={[0.6, 0.4]} />
+      <group userData={{ isEnemy: true }} position={[0, 0.6, 0]}>
+        <group position={[0, 1.2, 0]}>
+           <Box args={[1, 0.1, 0.1]}>
+              <meshBasicMaterial color="#333" />
+           </Box>
+           <Box args={[healthPercent / 100, 0.11, 0.11]} position={[(healthPercent / 100 - 1) / 2, 0, 0.01]}>
+              <meshBasicMaterial color={stats.color} />
+           </Box>
+        </group>
+
+        <Cylinder args={[0.5, 0.5, 1.2]} castShadow>
+          <meshStandardMaterial color={gameMode === 'hardcore' ? "#550088" : stats.color} roughness={0.9} />
         </Cylinder>
-        <Sphere args={[0.25]} position={[0, 0.85, 0]} castShadow>
-          <meshStandardMaterial color={gameMode === 'hardcore' ? "#7700aa" : "#aa2222"} roughness={0.7} />
-        </Sphere>
-        <Sphere args={[0.04]} position={[-0.1, 0.9, 0.22]}>
+        {type !== 'runner' && (
+          <Box args={[0.15, 0.15, 1.2]} position={[0, 0, 0.6]} castShadow>
+            <meshStandardMaterial color="#222" />
+          </Box>
+        )}
+        <Sphere args={[0.1]} position={[-0.2, 0.4, 0.4]}>
           <meshBasicMaterial color="#ff0055" toneMapped={false} />
         </Sphere>
-        <Sphere args={[0.04]} position={[0.1, 0.9, 0.22]}>
+        <Sphere args={[0.1]} position={[0.2, 0.4, 0.4]}>
           <meshBasicMaterial color="#ff0055" toneMapped={false} />
         </Sphere>
-        {/* Gun arm */}
-        <Box args={[0.1, 0.1, 0.8]} position={[0.4, 0.2, 0.4]} castShadow>
-          <meshStandardMaterial color="#222" />
-        </Box>
       </group>
     </RigidBody>
   );
-};
+});
+
+// --- WEAPON DROP ---
+const WeaponDrop = React.memo(({ id, type, position, onPickup }: any) => {
+  const ref = useRef<any>(null);
+  const posVec = useMemo(() => new THREE.Vector3(...position), [position]);
+  
+  useFrame((state, delta) => {
+    if (ref.current) {
+      ref.current.rotation.y += delta * 2;
+      ref.current.position.y = position[1] + Math.sin(state.clock.elapsedTime * 3) * 0.2;
+    }
+    if (playerState.pos.distanceTo(posVec) < 1.5) {
+      onPickup(id, type);
+    }
+  });
+
+  const color = type === 'shotgun' ? '#ff00ff' : '#00aaff';
+  return (
+    <group ref={ref} position={position}>
+      <Box args={[0.8, 0.2, 0.4]}>
+        <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.8} />
+      </Box>
+    </group>
+  );
+});
 
 // --- GAME MANAGER ---
-const GameManager = ({ bloodSystem, gameMode, setScore }: any) => {
-  const [enemies, setEnemies] = useState([{ id: 1, pos: [0, 5, -20] }]);
+const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCountdown, waveCountdown, setEnemiesRemaining, setWaveAnnouncement, setKillsInWave, killsInWave, setWeaponType }: any) => {
+  const [enemies, setEnemies] = useState<any[]>([]);
+  const [weaponDrops, setWeaponDrops] = useState<any[]>([]);
+  const killGoal = useMemo(() => 10 + (wave - 1) * 5, [wave]);
+
+  // Wave Mode Logic
+  useEffect(() => {
+    if (gameMode !== 'waves') return;
+    setEnemiesRemaining(killGoal);
+    setKillsInWave(0);
+    setEnemies([]);
+    setWaveAnnouncement(`WAVE ${wave}`);
+    soundManager.playWaveStart();
+    setTimeout(() => setWaveAnnouncement(null), 3000);
+  }, [wave, killGoal, setEnemiesRemaining, setWaveAnnouncement, gameMode, setKillsInWave]);
+
+  const killsInWaveRef = useRef(killsInWave);
+  const enemiesLengthRef = useRef(enemies.length);
 
   useEffect(() => {
-    const spawnRate = gameMode === 'hardcore' ? 1500 : 3000;
-    const maxEnemies = gameMode === 'hardcore' ? 20 : 12;
+    killsInWaveRef.current = killsInWave;
+    enemiesLengthRef.current = enemies.length;
+  }, [killsInWave, enemies.length]);
 
+  useEffect(() => {
+    if (playerState.gameState !== 'playing' || gameMode !== 'waves') return;
+    
+    // Calculate how many more we need to spawn to reach the goal
+    const totalActiveAndKilled = killsInWaveRef.current + enemiesLengthRef.current;
+    const maxOnScreen = Math.min(10, 5 + Math.floor(wave / 2));
+    
+    if (totalActiveAndKilled >= killGoal || enemiesLengthRef.current >= maxOnScreen) return;
+
+    const spawnRate = Math.max(600, 2000 - (wave - 1) * 150);
     const interval = setInterval(() => {
       setEnemies(prev => {
-        if (prev.length > maxEnemies) return prev; // Max enemies
-        if (playerState.health <= 0) return prev;
-
+        const currentTotal = killsInWaveRef.current + prev.length;
+        if (currentTotal >= killGoal || prev.length >= maxOnScreen) return prev;
+        
         const angle = Math.random() * Math.PI * 2;
-        const radius = 25 + Math.random() * 15;
+        const radius = 40 + Math.random() * 30;
+        
+        let type = 'standard';
+        const rand = Math.random();
+        if (wave >= 3 && rand < 0.2) type = 'runner';
+        if (wave >= 5 && rand > 0.8) type = 'tank';
+        if (wave >= 8 && rand > 0.6) type = Math.random() > 0.5 ? 'runner' : 'tank';
+
         return [
           ...prev,
           {
-            id: Date.now(),
+            id: Date.now() + Math.random(),
+            type,
             pos: [Math.cos(angle) * radius, 5, Math.sin(angle) * radius]
           }
         ];
       });
     }, spawnRate);
     return () => clearInterval(interval);
+  }, [wave, killGoal, gameMode]);
+
+  // Endless Mode Logic
+  useEffect(() => {
+    if (playerState.gameState !== 'playing' || gameMode !== 'endless') return;
+
+    const interval = setInterval(() => {
+      setEnemies(prev => {
+        if (prev.length > 20) return prev;
+        
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 40 + Math.random() * 40;
+        return [
+          ...prev,
+          {
+            id: Date.now() + Math.random(),
+            pos: [Math.cos(angle) * radius, 5, Math.sin(angle) * radius]
+          }
+        ];
+      });
+    }, 2000);
+    return () => clearInterval(interval);
   }, [gameMode]);
 
-  const handleDie = (id: number) => {
+  const handleDie = useCallback((id: number, isKill: boolean = true, pos?: THREE.Vector3) => {
     setEnemies(prev => prev.filter(e => e.id !== id));
-    setScore((s: number) => s + (gameMode === 'hardcore' ? 20 : 10));
-  };
+    
+    if (isKill) {
+      setScore((s: number) => s + 10);
+
+      if (pos && Math.random() < 0.25) {
+        const types = ['shotgun', 'machinegun'];
+        const type = types[Math.floor(Math.random() * types.length)];
+        setWeaponDrops(prev => [...prev, { id: Date.now() + Math.random(), type, pos: pos.toArray() }]);
+      }
+
+      if (gameMode === 'waves') {
+        setKillsInWave((k: number) => {
+          const newKills = k + 1;
+          const remaining = Math.max(0, killGoal - newKills);
+          setEnemiesRemaining(remaining);
+          return newKills;
+        });
+      }
+    }
+  }, [gameMode, killGoal, setEnemiesRemaining, setKillsInWave, setScore]);
+
+  const handlePickup = useCallback((id: number, type: string) => {
+    setWeaponDrops(prev => prev.filter(w => w.id !== id));
+    playerState.weapon = type as any;
+    playerState.maxAmmo = type === 'machinegun' ? 50 : type === 'shotgun' ? 12 : 30;
+    playerState.ammo = playerState.maxAmmo;
+    setWeaponType(type);
+    soundManager.playReload();
+  }, [setWeaponType]);
+
+  const isTransitioning = useRef(false);
+
+  // Check for wave completion
+  useEffect(() => {
+    if (gameMode === 'waves' && killsInWave >= killGoal && enemies.length === 0 && !isTransitioning.current) {
+      isTransitioning.current = true;
+      soundManager.playWaveClear();
+      let count = 5;
+      setWaveCountdown(count);
+      const timer = setInterval(() => {
+        count -= 1;
+        setWaveCountdown(count);
+        if (count <= 0) {
+          clearInterval(timer);
+          setWave((w: number) => w + 1);
+          setWaveCountdown(0);
+          isTransitioning.current = false;
+        }
+      }, 1000);
+      return () => {
+        clearInterval(timer);
+        isTransitioning.current = false;
+      };
+    }
+  }, [killsInWave, killGoal, enemies.length, gameMode, setWave, setWaveCountdown]);
 
   return (
     <>
       {enemies.map(e => (
-        <Enemy key={e.id} id={e.id} initialPos={e.pos} bloodSystem={bloodSystem} onDie={handleDie} gameMode={gameMode} />
+        <Enemy key={e.id} id={e.id} type={e.type} initialPos={e.pos} bloodSystem={bloodSystem} onDie={handleDie} gameMode={gameMode} wave={wave} />
+      ))}
+      {weaponDrops.map(w => (
+        <WeaponDrop key={w.id} id={w.id} type={w.type} position={w.pos} onPickup={handlePickup} />
       ))}
     </>
   );
 };
 
-// --- PLAYER & WEAPON ---
-const Player = ({ setHealth, setDamageFlash }: any) => {
-  const bodyRef = useRef<any>(null);
+// --- PLAYER ---
+const Player = ({ setHealth, setDamageFlash, setAmmo, setIsReloading, bodyRef }: any) => {
   const { camera } = useThree();
-  const euler = useMemo(() => new THREE.Euler(0, 0, 0, 'YXZ'), []);
   const lastShootTime = useRef(0);
+  const lastActionTime = useRef(0);
+  const shieldRef = useRef<any>(null);
+  const flashRef = useRef<any>(null);
+  const raycaster = useMemo(() => new THREE.Raycaster(), []);
+  const groundPlane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
+  const intersectPoint = useMemo(() => new THREE.Vector3(), []);
+  const [isSpeedBoosted, setIsSpeedBoosted] = useState(false);
 
   useEffect(() => {
     playerState.takeDamage = (amount: number) => {
-      if (playerState.health <= 0) return;
+      const currentTime = performance.now() / 1000;
+      const isShielded = currentTime < playerState.shieldEndTime;
+      if (playerState.health <= 0 || isShielded) return;
+      
       playerState.health -= amount;
       setHealth(playerState.health);
       setDamageFlash(true);
+      soundManager.playPlayerDamage();
+      lastActionTime.current = currentTime;
       setTimeout(() => setDamageFlash(false), 150);
     };
   }, [setHealth, setDamageFlash]);
 
   useFrame((state, delta) => {
-    if (!bodyRef.current || playerState.health <= 0) return;
+    if (!bodyRef.current || playerState.health <= 0 || playerState.gameState !== 'playing') return;
+
+    const currentTime = performance.now() / 1000;
+
+    // --- ABILITIES ---
+    if ((inputRef.keys.q || (inputRef as any).abilities.q) && currentTime > playerState.abilityCooldowns.q) {
+      playerState.abilityCooldowns.q = currentTime + 10;
+      (inputRef as any).abilities.q = false;
+      playerState.shockwaveTime = currentTime;
+      soundManager.playExplosion();
+      enemiesData.forEach((e: any, id) => {
+        const dist = e.pos.distanceTo(playerState.pos);
+        if (dist < 15) {
+          const pushDir = new THREE.Vector3().subVectors(e.pos, playerState.pos).normalize().multiplyScalar(30);
+          e.takeDamage(30, e.pos);
+          if (e.push) e.push(pushDir);
+        }
+      });
+    }
+
+    if ((inputRef.keys.e || (inputRef as any).abilities.e) && currentTime > playerState.abilityCooldowns.e) {
+      playerState.abilityCooldowns.e = currentTime + 20;
+      (inputRef as any).abilities.e = false;
+      playerState.shieldEndTime = currentTime + 4;
+      soundManager.playReload(); // Reuse reload for shield sound
+    }
+    
+    const currentlyBoosted = performance.now() < (playerState.speedBoostEndTime || 0);
+    if (currentlyBoosted !== isSpeedBoosted) {
+      setIsSpeedBoosted(currentlyBoosted);
+    }
+
+    // Health Regeneration (Brawl Stars style: 4 seconds of no action)
+    if (currentTime - lastActionTime.current > 4 && playerState.health < 100) {
+      const oldHealthInt = Math.floor(playerState.health);
+      playerState.health = Math.min(100, playerState.health + delta * 15);
+      const newHealthInt = Math.floor(playerState.health);
+      if (oldHealthInt !== newHealthInt) {
+        setHealth(playerState.health);
+      }
+    }
 
     try {
-      // Rotation
-      euler.y -= inputRef.lookDelta.x;
-      euler.x -= inputRef.lookDelta.y;
-      euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
-      camera.quaternion.setFromEuler(euler);
-
-      inputRef.lookDelta.x = 0;
-      inputRef.lookDelta.y = 0;
+      const posObj = bodyRef.current.translation();
+      if (!posObj || isNaN(posObj.x)) return;
+      const px = posObj.x, py = posObj.y, pz = posObj.z;
+      const playerPos = new THREE.Vector3(px, py, pz);
+      playerState.pos.copy(playerPos);
 
       // Movement
-      const velObj = bodyRef.current.linvel();
-      if (!velObj || isNaN(velObj.y)) return;
-      const vy = velObj.y;
-      
-      let moveX = inputRef.move.x;
-      let moveY = inputRef.move.y;
+      let mx = 0; let mz = 0;
+      if (inputRef.keys.a) mx -= 1;
+      if (inputRef.keys.d) mx += 1;
+      if (inputRef.keys.w) mz -= 1;
+      if (inputRef.keys.s) mz += 1;
 
-      if (inputRef.keys.w) moveY = -1;
-      if (inputRef.keys.s) moveY = 1;
-      if (inputRef.keys.a) moveX = -1;
-      if (inputRef.keys.d) moveX = 1;
+      if (mx === 0 && mz === 0) {
+        mx = inputRef.move.x;
+        mz = inputRef.move.y;
+      }
 
-      const direction = new THREE.Vector3(moveX, 0, moveY);
-      if (direction.lengthSq() > 0.001) {
-        direction.applyEuler(new THREE.Euler(0, euler.y, 0));
-        direction.normalize().multiplyScalar(PLAYER_SPEED);
+      const moveVec = new THREE.Vector2(mx, mz);
+      const isSpeedBoosted = performance.now() < (playerState.speedBoostEndTime || 0);
+      const currentSpeed = isSpeedBoosted ? PLAYER_SPEED * 1.8 : PLAYER_SPEED;
+
+      if (moveVec.lengthSq() > 0.001) {
+        moveVec.normalize().multiplyScalar(currentSpeed);
       } else {
-        direction.set(0, 0, 0);
+        moveVec.set(0, 0);
       }
 
-      if (!isNaN(direction.x) && !isNaN(direction.z)) {
-        bodyRef.current.setLinvel({ x: direction.x, y: vy, z: direction.z }, true);
+      const velObj = bodyRef.current.linvel();
+      const vy = (velObj && !isNaN(velObj.y)) ? velObj.y : 0;
+      bodyRef.current.setLinvel({ x: moveVec.x, y: vy, z: moveVec.y }, true);
+
+      // Aiming
+      let angle = 0;
+      if (inputRef.isMobileAiming) {
+        if (inputRef.aim.x !== 0 || inputRef.aim.y !== 0) {
+          angle = Math.atan2(inputRef.aim.x, inputRef.aim.y);
+        }
+      } else {
+        raycaster.setFromCamera(inputRef.mouseNDC, camera);
+        raycaster.ray.intersectPlane(groundPlane, intersectPoint);
+        angle = Math.atan2(intersectPoint.x - px, intersectPoint.z - pz);
       }
 
-      // Jumping
-      if (inputRef.keys.space && Math.abs(vy) < 0.5) {
-        bodyRef.current.setLinvel({ x: direction.x, y: 8, z: direction.z }, true);
-        inputRef.keys.space = false;
-      }
+      const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+      bodyRef.current.setRotation(quat, true);
 
-      // Sync camera position
-      const posObj = bodyRef.current.translation();
-      if (posObj && !isNaN(posObj.x)) {
-        const px = posObj.x, py = posObj.y, pz = posObj.z;
-        camera.position.set(px, py + 0.6, pz);
-        playerState.pos.set(px, py, pz);
+      // Camera follow (Top-Down pseudo-orthographic)
+      const targetCamPos = new THREE.Vector3(px, 35, pz + 15);
+      camera.position.lerp(targetCamPos, delta * 5);
+      camera.lookAt(px, 0, pz);
+
+      // Reloading
+      if ((inputRef.keys.r || playerState.ammo <= 0) && !playerState.isReloading && playerState.ammo < playerState.maxAmmo) {
+        playerState.isReloading = true;
+        setIsReloading(true);
+        inputRef.keys.r = false;
+        soundManager.playReload();
+        
+        setTimeout(() => {
+          playerState.ammo = playerState.maxAmmo;
+          playerState.isReloading = false;
+          setAmmo(playerState.maxAmmo);
+          setIsReloading(false);
+        }, 2000);
       }
 
       // Shooting
-      if (inputRef.isShooting && state.clock.elapsedTime - lastShootTime.current > 0.12) {
-        lastShootTime.current = state.clock.elapsedTime;
-        inputRef.justShot = true;
+      const isTryingToShoot = inputRef.isShooting || (inputRef.isMobileAiming && inputRef.isShooting);
+      
+      let cooldown = 0.15;
+      let damage = 35;
+      let spread = 0.02;
+      let bulletsToSpawn = 1;
+      
+      if (playerState.weapon === 'machinegun') {
+        cooldown = 0.08;
+        damage = 15;
+        spread = 0.08;
+      } else if (playerState.weapon === 'shotgun') {
+        cooldown = 0.7;
+        damage = 15;
+        spread = 0.2;
+        bulletsToSpawn = 5;
+      }
 
-        const shootDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
-        // Spawn bullet slightly in front and below camera (gun barrel)
-        const spawnPos = camera.position.clone().addScaledVector(shootDir, 1.0).add(new THREE.Vector3(0, -0.2, 0));
+      if (isTryingToShoot && !playerState.isReloading && playerState.ammo > 0 && currentTime - lastShootTime.current > cooldown) {
+        lastShootTime.current = currentTime;
+        inputRef.justShot = true;
         
-        spawnBullet(spawnPos, shootDir, BULLET_SPEED, true);
+        playerState.ammo -= 1;
+        setAmmo(playerState.ammo);
+        lastActionTime.current = currentTime;
+
+        for (let i = 0; i < bulletsToSpawn; i++) {
+          const shootDir = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle)).normalize();
+          shootDir.x += (Math.random() - 0.5) * spread;
+          shootDir.z += (Math.random() - 0.5) * spread;
+          shootDir.normalize();
+          const spawnPos = playerPos.clone().addScaledVector(shootDir, 1.2).add(new THREE.Vector3(0, 0.5, 0));
+          
+          spawnBullet(spawnPos, shootDir, BULLET_SPEED, true, damage);
+        }
+        soundManager.playShoot();
+      } else if (isTryingToShoot && !playerState.isReloading && playerState.ammo <= 0 && currentTime - lastShootTime.current > 0.3) {
+        lastShootTime.current = currentTime;
+        soundManager.playEmptyAmmo();
+        inputRef.justShot = false;
       } else {
         inputRef.justShot = false;
+      }
+
+      if (shieldRef.current) {
+        shieldRef.current.visible = currentTime < playerState.shieldEndTime;
+        if (shieldRef.current.visible) {
+          shieldRef.current.rotation.y += delta * 2;
+          shieldRef.current.rotation.x += delta;
+        }
+      }
+      if (flashRef.current) {
+        flashRef.current.visible = inputRef.justShot;
       }
     } catch (e) {}
   });
 
   return (
-    <RigidBody ref={bodyRef} type="dynamic" position={[0, 5, 20]} enabledRotations={[false, false, false]} colliders={false} friction={0}>
-      <CapsuleCollider args={[0.5, 0.3]} friction={0} />
+    <RigidBody ref={bodyRef} type="dynamic" position={[0, 5, 0]} enabledRotations={[false, false, false]} colliders={false} lockRotations friction={0} userData={{ isPlayer: true }}>
+      <CapsuleCollider args={[0.5, 0.4]} friction={0} />
+      <group position={[0, 0.5, 0]}>
+        {/* Shield Visual */}
+        <Sphere ref={shieldRef} args={[1.2, 32, 32]} visible={false}>
+          <meshStandardMaterial color="#aa00ff" transparent opacity={0.3} emissive="#aa00ff" emissiveIntensity={2} wireframe />
+        </Sphere>
+        <Cylinder args={[0.5, 0.5, 1]} castShadow>
+          <meshStandardMaterial color="#00ffcc" />
+        </Cylinder>
+        <Box args={[0.15, 0.15, 1.2]} position={[0, 0, 0.6]} castShadow>
+          <meshStandardMaterial color="#333" />
+        </Box>
+        {/* Flash effect when shooting */}
+        <pointLight ref={flashRef} position={[0, 0, 1.5]} color="#ffff00" distance={15} intensity={5} visible={false} />
+        {/* Speed boost indicator */}
+        {isSpeedBoosted && (
+           <pointLight position={[0, 0, 0]} color="#00ff00" distance={10} intensity={3} />
+        )}
+        {/* Shockwave visual */}
+        {performance.now() / 1000 < (playerState.shockwaveTime || 0) + 0.5 && (
+          <Sphere args={[15, 32, 32]}>
+            <meshStandardMaterial color="#00ffff" transparent opacity={0.1} emissive="#00ffff" emissiveIntensity={5} />
+          </Sphere>
+        )}
+      </group>
     </RigidBody>
   );
 };
 
-const Weapon = () => {
-  const { camera } = useThree();
-  const weaponRef = useRef<THREE.Group>(null);
-  const flashRef = useRef<THREE.PointLight>(null);
+// --- MOBILE CONTROLS UI (TWIN STICK) ---
+const MobileControls = ({ setGameState }: { setGameState: (state: 'menu' | 'playing' | 'gameover' | 'paused') => void }) => {
+  const [leftOrigin, setLeftOrigin] = useState<{x: number, y: number} | null>(null);
+  const [leftCurrent, setLeftCurrent] = useState<{x: number, y: number} | null>(null);
+  const [rightOrigin, setRightOrigin] = useState<{x: number, y: number} | null>(null);
+  const [rightCurrent, setRightCurrent] = useState<{x: number, y: number} | null>(null);
 
-  useFrame((state, delta) => {
-    if (!weaponRef.current) return;
-    
-    const targetPos = new THREE.Vector3(0.3, -0.3, -0.6).applyQuaternion(camera.quaternion).add(camera.position);
-    const targetQuat = camera.quaternion.clone();
-
-    if (inputRef.justShot) {
-      targetPos.add(new THREE.Vector3(0, 0, 0.15).applyQuaternion(camera.quaternion));
-      targetQuat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 0.08));
-      if (flashRef.current) flashRef.current.intensity = 8 + Math.random() * 4;
+  const handleTouchStart = (e: React.TouchEvent, side: 'left' | 'right') => {
+    const touch = e.changedTouches[0];
+    if (side === 'left') {
+      setLeftOrigin({ x: touch.clientX, y: touch.clientY });
+      setLeftCurrent({ x: touch.clientX, y: touch.clientY });
     } else {
-      if (flashRef.current) flashRef.current.intensity = THREE.MathUtils.lerp(flashRef.current.intensity, 0, delta * 20);
+      setRightOrigin({ x: touch.clientX, y: touch.clientY });
+      setRightCurrent({ x: touch.clientX, y: touch.clientY });
+      inputRef.isMobileAiming = true;
     }
+  };
 
-    weaponRef.current.position.lerp(targetPos, delta * 15);
-    weaponRef.current.quaternion.slerp(targetQuat, delta * 15);
-  });
+  const handleTouchMove = (e: React.TouchEvent, side: 'left' | 'right') => {
+    const touch = Array.from(e.touches).find(t => 
+      side === 'left' ? t.clientX < window.innerWidth / 2 : t.clientX >= window.innerWidth / 2
+    );
+    if (!touch) return;
 
-  return (
-    <group ref={weaponRef}>
-      <Box args={[0.06, 0.08, 0.7]} castShadow>
-        <meshStandardMaterial color="#111" metalness={0.8} roughness={0.2} />
-      </Box>
-      <Box args={[0.05, 0.2, 0.15]} position={[0, -0.15, 0.2]} rotation={[0.2, 0, 0]} castShadow>
-        <meshStandardMaterial color="#222" roughness={0.9} />
-      </Box>
-      <pointLight ref={flashRef} position={[0, 0, -0.4]} color="#ffff00" distance={15} intensity={0} />
-      <pointLight position={[0, 0, 0]} color="#ffffff" distance={30} intensity={1.5} />
-    </group>
-  );
-};
-
-// --- MOBILE CONTROLS UI ---
-const MobileControls = () => {
-  const [joystickRenderPos, setJoystickRenderPos] = useState({ x: 0, y: 0 });
-  const [joystickRenderCenter, setJoystickRenderCenter] = useState({ x: 0, y: 0 });
-  const [isDraggingLeft, setIsDraggingLeft] = useState(false);
-  
-  const joystickCenter = useRef({ x: 0, y: 0 });
-  const leftTouchId = useRef<number | null>(null);
-  const rightTouchId = useRef<number | null>(null);
-  const lastLook = useRef({ x: 0, y: 0 });
-
-  const handleTouchStart = (e: React.TouchEvent) => {
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const touch = e.changedTouches[i];
-      if (touch.clientX < window.innerWidth / 2 && leftTouchId.current === null) {
-        leftTouchId.current = touch.identifier;
-        joystickCenter.current = { x: touch.clientX, y: touch.clientY };
-        setJoystickRenderCenter({ x: touch.clientX, y: touch.clientY });
-        setJoystickRenderPos({ x: touch.clientX, y: touch.clientY });
-        setIsDraggingLeft(true);
-      } else if (touch.clientX >= window.innerWidth / 2 && rightTouchId.current === null) {
-        rightTouchId.current = touch.identifier;
-        lastLook.current = { x: touch.clientX, y: touch.clientY };
+    if (side === 'left' && leftOrigin) {
+      setLeftCurrent({ x: touch.clientX, y: touch.clientY });
+      const dx = touch.clientX - leftOrigin.x;
+      const dy = touch.clientY - leftOrigin.y;
+      const dist = Math.min(50, Math.hypot(dx, dy));
+      const angle = Math.atan2(dy, dx);
+      inputRef.move.x = (Math.cos(angle) * dist) / 50;
+      inputRef.move.y = (Math.sin(angle) * dist) / 50;
+    } else if (side === 'right' && rightOrigin) {
+      setRightCurrent({ x: touch.clientX, y: touch.clientY });
+      const dx = touch.clientX - rightOrigin.x;
+      const dy = touch.clientY - rightOrigin.y;
+      const dist = Math.min(50, Math.hypot(dx, dy));
+      const angle = Math.atan2(dy, dx);
+      inputRef.aim.x = Math.cos(angle);
+      inputRef.aim.y = Math.sin(angle);
+      if (dist > 20) {
+         inputRef.isShooting = true;
+      } else {
+         inputRef.isShooting = false;
       }
     }
   };
 
-  const handleTouchMove = (e: React.TouchEvent) => {
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const touch = e.changedTouches[i];
-      
-      if (touch.identifier === leftTouchId.current) {
-        const dx = touch.clientX - joystickCenter.current.x;
-        const dy = touch.clientY - joystickCenter.current.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        const maxDist = 50;
-
-        let nx = dx;
-        let ny = dy;
-        if (distance > maxDist) {
-          nx = (dx / distance) * maxDist;
-          ny = (dy / distance) * maxDist;
-        }
-
-        setJoystickRenderPos({ x: joystickCenter.current.x + nx, y: joystickCenter.current.y + ny });
-        inputRef.move.x = nx / maxDist;
-        inputRef.move.y = ny / maxDist;
-      } else if (touch.identifier === rightTouchId.current) {
-        const dx = touch.clientX - lastLook.current.x;
-        const dy = touch.clientY - lastLook.current.y;
-        inputRef.lookDelta.x += dx * 0.005;
-        inputRef.lookDelta.y += dy * 0.005;
-        lastLook.current = { x: touch.clientX, y: touch.clientY };
-      }
-    }
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const touch = e.changedTouches[i];
-      if (touch.identifier === leftTouchId.current) {
-        leftTouchId.current = null;
-        setIsDraggingLeft(false);
-        inputRef.move.x = 0;
-        inputRef.move.y = 0;
-      } else if (touch.identifier === rightTouchId.current) {
-        rightTouchId.current = null;
-      }
+  const handleTouchEnd = (e: React.TouchEvent, side: 'left' | 'right') => {
+    if (side === 'left') {
+      setLeftOrigin(null);
+      setLeftCurrent(null);
+      inputRef.move = { x: 0, y: 0 };
+    } else {
+      setRightOrigin(null);
+      setRightCurrent(null);
+      inputRef.aim = { x: 0, y: 0 };
+      inputRef.isMobileAiming = false;
+      inputRef.isShooting = false;
     }
   };
 
   return (
-    <div 
-      className="absolute inset-0 z-10 touch-none select-none"
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
-      onTouchCancel={handleTouchEnd}
-      onClick={() => {
-        if (!document.pointerLockElement) {
-          document.body.requestPointerLock?.();
-        }
-      }}
-    >
-      {isDraggingLeft && (
-        <div
-          className="absolute w-28 h-28 bg-white/10 rounded-full border-2 border-white/20 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
-          style={{ left: joystickRenderCenter.x, top: joystickRenderCenter.y }}
-        >
-          <div
-            className="absolute w-12 h-12 bg-white/60 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-lg"
-            style={{
-              left: 56 + (joystickRenderPos.x - joystickRenderCenter.x),
-              top: 56 + (joystickRenderPos.y - joystickRenderCenter.y),
-            }}
-          />
-        </div>
-      )}
-      <button
-        className="absolute bottom-12 right-12 w-24 h-24 bg-red-600/60 rounded-full border-4 border-red-400 active:bg-red-500 flex items-center justify-center text-white font-black text-2xl shadow-[0_0_30px_rgba(255,0,0,0.6)] select-none pointer-events-auto"
-        onTouchStart={(e) => { e.stopPropagation(); inputRef.isShooting = true; }}
-        onTouchEnd={(e) => { e.stopPropagation(); inputRef.isShooting = false; }}
-        onMouseDown={(e) => { e.stopPropagation(); inputRef.isShooting = true; }}
-        onMouseUp={(e) => { e.stopPropagation(); inputRef.isShooting = false; }}
-        onMouseLeave={() => { inputRef.isShooting = false; }}
+    <div className="absolute inset-0 z-30 flex pointer-events-none touch-none">
+      <div 
+        className="flex-1 pointer-events-auto touch-none"
+        onTouchStart={e => handleTouchStart(e, 'left')}
+        onTouchMove={e => handleTouchMove(e, 'left')}
+        onTouchEnd={e => handleTouchEnd(e, 'left')}
+        onTouchCancel={e => handleTouchEnd(e, 'left')}
       >
-        FIRE
-      </button>
+        {leftOrigin && leftCurrent && (
+          <div className="absolute w-24 h-24 border-2 border-white/30 rounded-full -translate-x-1/2 -translate-y-1/2" style={{ left: leftOrigin.x, top: leftOrigin.y }}>
+            <div className="absolute w-10 h-10 bg-white/50 rounded-full -translate-x-1/2 -translate-y-1/2" style={{ left: 48 + (leftCurrent.x - leftOrigin.x), top: 48 + (leftCurrent.y - leftOrigin.y) }} />
+          </div>
+        )}
+      </div>
+      <div 
+        className="flex-1 pointer-events-auto touch-none"
+        onTouchStart={e => handleTouchStart(e, 'right')}
+        onTouchMove={e => handleTouchMove(e, 'right')}
+        onTouchEnd={e => handleTouchEnd(e, 'right')}
+        onTouchCancel={e => handleTouchEnd(e, 'right')}
+      >
+        {rightOrigin && rightCurrent && (
+          <div className="absolute w-24 h-24 border-2 border-white/30 rounded-full -translate-x-1/2 -translate-y-1/2" style={{ left: rightOrigin.x, top: rightOrigin.y }}>
+            <div className="absolute w-10 h-10 bg-red-500/50 rounded-full -translate-x-1/2 -translate-y-1/2" style={{ left: 48 + (rightCurrent.x - rightOrigin.x), top: 48 + (rightCurrent.y - rightOrigin.y) }} />
+          </div>
+        )}
+      </div>
+      <div className="absolute bottom-8 right-[50%] translate-x-1/2 pointer-events-auto flex gap-4">
+         <button 
+           className="w-20 h-20 bg-blue-500/30 border-2 border-blue-300/50 rounded-full text-white font-bold active:bg-blue-600/50 backdrop-blur-sm"
+           onTouchStart={() => { inputRef.keys.r = true; }}
+           onTouchEnd={() => { inputRef.keys.r = false; }}
+           onMouseDown={() => { inputRef.keys.r = true; }}
+           onMouseUp={() => { inputRef.keys.r = false; }}
+         >
+           RELOAD
+         </button>
+         <button 
+           className="w-20 h-20 bg-gray-500/30 border-2 border-gray-300/50 rounded-full text-white font-bold active:bg-gray-600/50 backdrop-blur-sm"
+           onClick={() => setGameState('paused')}
+         >
+           PAUSE
+         </button>
+      </div>
     </div>
   );
 };
 
 // --- UI COMPONENTS ---
-const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'normal' | 'hardcore') => void, highscore: number }) => (
+const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'endless' | 'waves') => void, highscore: number }) => (
   <motion.div
     initial={{ opacity: 0, scale: 0.9 }}
     animate={{ opacity: 1, scale: 1 }}
@@ -742,7 +1373,7 @@ const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'normal' | 'hardcore
       initial={{ y: -50, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
-      className="text-7xl md:text-9xl font-black text-transparent bg-clip-text bg-gradient-to-br from-red-500 to-purple-600 mb-4 drop-shadow-[0_0_20px_rgba(255,0,0,0.8)] tracking-widest text-center"
+      className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-br from-red-500 to-purple-600 mb-4 drop-shadow-[0_0_20px_rgba(255,0,0,0.8)] tracking-widest text-center"
     >
       CYBER ARENA
     </motion.h1>
@@ -750,32 +1381,32 @@ const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'normal' | 'hardcore
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       transition={{ delay: 0.4 }}
-      className="text-red-400 text-2xl mb-12 font-mono text-center tracking-widest"
+      className="text-red-400 text-xl mb-6 font-mono text-center tracking-widest"
     >
       HIGHSCORE: {highscore}
     </motion.p>
-    <div className="flex flex-col md:flex-row gap-6">
+    <div className="flex flex-col md:flex-row gap-4">
       <motion.button
         whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(255, 0, 0, 0.8)" }}
         whileTap={{ scale: 0.95 }}
         initial={{ x: -50, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={{ delay: 0.5, type: 'spring' }}
-        onClick={() => onStart('normal')}
-        className="px-10 py-5 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-2xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto"
+        onClick={() => { soundManager.playMenuClick(); onStart('endless'); }}
+        className="px-6 py-3 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto"
       >
-        NORMAL
+        ENDLESS MODE
       </motion.button>
       <motion.button
-        whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(128, 0, 128, 0.8)" }}
+        whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(150, 0, 255, 0.8)" }}
         whileTap={{ scale: 0.95 }}
         initial={{ x: 50, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={{ delay: 0.6, type: 'spring' }}
-        onClick={() => onStart('hardcore')}
-        className="px-10 py-5 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-2xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto"
+        onClick={() => { soundManager.playMenuClick(); onStart('waves'); }}
+        className="px-6 py-3 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto"
       >
-        HARDCORE
+        WAVE MODE
       </motion.button>
     </div>
   </motion.div>
@@ -783,89 +1414,224 @@ const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'normal' | 'hardcore
 
 const GameOver = ({ onRestart, onMenu, score, highscore }: { onRestart: () => void, onMenu: () => void, score: number, highscore: number }) => (
   <motion.div
-    initial={{ opacity: 0, backdropFilter: "blur(0px)" }}
-    animate={{ opacity: 1, backdropFilter: "blur(12px)" }}
+    initial={{ opacity: 0, scale: 1.2 }}
+    animate={{ opacity: 1, scale: 1 }}
     exit={{ opacity: 0 }}
-    transition={{ duration: 0.5 }}
-    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/90"
+    transition={{ duration: 0.4 }}
+    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/90 backdrop-blur-lg"
   >
-    <motion.h1
-      initial={{ scale: 0.5, opacity: 0, rotate: -5 }}
-      animate={{ scale: 1, opacity: 1, rotate: 0 }}
-      transition={{ type: 'spring', bounce: 0.6, duration: 0.8 }}
-      className="text-8xl font-black text-red-600 mb-8 drop-shadow-[0_0_30px_rgba(255,0,0,1)] text-center"
+    <motion.h2
+      initial={{ scale: 0.5, opacity: 0 }}
+      animate={{ scale: 1, opacity: 1 }}
+      transition={{ delay: 0.2, type: 'spring', bounce: 0.6 }}
+      className="text-8xl font-black text-red-600 mb-8 drop-shadow-[0_0_30px_rgba(255,0,0,0.8)] tracking-widest"
     >
       GAME OVER
-    </motion.h1>
+    </motion.h2>
     
-    <motion.div
-      initial={{ scale: 0.8, opacity: 0 }}
-      animate={{ scale: 1, opacity: 1 }}
-      transition={{ delay: 0.5, type: 'spring' }}
-      className="bg-red-950/50 p-8 rounded-2xl border border-red-500/30 mb-12 flex flex-col items-center min-w-[300px]"
-    >
-      <p className="text-white text-4xl mb-2 font-mono font-bold text-center">SCORE: {score}</p>
-      <p className="text-red-400 text-xl font-mono text-center">HIGHSCORE: {highscore}</p>
-    </motion.div>
+    <div className="flex flex-col items-center gap-4 mb-12">
+      <motion.div
+        initial={{ y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ delay: 0.4 }}
+        className="text-4xl font-mono text-white"
+      >
+        SCORE: <span className="text-yellow-400 font-bold">{score}</span>
+      </motion.div>
+      <motion.div
+        initial={{ y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ delay: 0.5 }}
+        className="text-2xl font-mono text-gray-400"
+      >
+        BEST: {highscore}
+      </motion.div>
+    </div>
 
-    <div className="flex flex-col sm:flex-row gap-6">
+    <div className="flex gap-6">
       <motion.button
-        whileHover={{ scale: 1.05, boxShadow: "0px 0px 20px rgba(255, 0, 0, 0.6)" }}
+        whileHover={{ scale: 1.05, backgroundColor: "rgba(255,0,0,0.2)" }}
         whileTap={{ scale: 0.95 }}
         initial={{ y: 50, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        transition={{ delay: 0.7, type: 'spring' }}
+        transition={{ delay: 0.6 }}
         onClick={onRestart}
-        className="px-8 py-4 bg-red-900 hover:bg-red-700 text-white font-bold text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto shadow-[0_0_20px_rgba(255,0,0,0.3)]"
+        className="px-8 py-4 border-2 border-red-500 text-red-500 font-bold text-xl tracking-widest hover:text-red-400 cursor-pointer pointer-events-auto"
       >
-        NOCHMAL SPIELEN
+        TRY AGAIN
       </motion.button>
       <motion.button
         whileHover={{ scale: 1.05, backgroundColor: "rgba(255,255,255,0.1)" }}
         whileTap={{ scale: 0.95 }}
         initial={{ y: 50, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        transition={{ delay: 0.8, type: 'spring' }}
+        transition={{ delay: 0.7 }}
         onClick={onMenu}
-        className="px-8 py-4 bg-transparent text-white font-bold text-xl rounded-xl border-2 border-white/30 hover:border-white cursor-pointer pointer-events-auto transition-colors"
+        className="px-8 py-4 border-2 border-gray-500 text-gray-300 font-bold text-xl tracking-widest hover:text-white cursor-pointer pointer-events-auto"
       >
-        HAUPTMENÜ
+        MAIN MENU
       </motion.button>
     </div>
   </motion.div>
 );
 
-const HUD = ({ health, score }: { health: number, score: number }) => {
-  const displayHealth = Math.max(0, health);
+const AbilityIcon = ({ label, name, cooldown, abilityKey, color, onClick }: any) => {
+  const [progress, setProgress] = useState(1);
+  const [remainingTime, setRemainingTime] = useState(0);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = performance.now() / 1000;
+      const cooldownEndTime = playerState.abilityCooldowns[abilityKey as keyof typeof playerState.abilityCooldowns];
+      const remaining = Math.max(0, cooldownEndTime - now);
+      setRemainingTime(remaining);
+      setProgress(1 - remaining / cooldown);
+    }, 50);
+    return () => clearInterval(interval);
+  }, [cooldown, abilityKey]);
+
+  return (
+    <div className="flex flex-col items-center pointer-events-auto cursor-pointer group" onPointerDown={onClick}>
+      <div className="relative w-12 h-12 md:w-10 md:h-10 bg-black/60 border-2 border-white/20 flex items-center justify-center overflow-hidden group-active:scale-90 transition-transform">
+        <div 
+          className="absolute bottom-0 left-0 w-full" 
+          style={{ height: `${progress * 100}%`, backgroundColor: color, opacity: 0.4 }} 
+        />
+        {remainingTime > 0 ? (
+          <span className="relative z-10 font-black text-white text-lg md:text-base">{Math.ceil(remainingTime)}</span>
+        ) : (
+          <span className="relative z-10 font-black text-white italic text-lg md:text-base">{label}</span>
+        )}
+      </div>
+      <span className="text-[8px] font-mono mt-1 opacity-50 tracking-widest uppercase" style={{ color }}>{name}</span>
+    </div>
+  );
+};
+
+const PowerupButton = ({ label, name, count, color, onClick }: any) => (
+  <div className="flex flex-col items-center pointer-events-auto cursor-pointer group" onPointerDown={onClick}>
+    <div className="relative w-12 h-12 md:w-10 md:h-10 bg-black/60 border-2 border-white/20 flex items-center justify-center overflow-hidden group-active:scale-90 transition-transform">
+      <div className="absolute inset-0 opacity-10" style={{ backgroundColor: color }} />
+      <span className="relative z-10 font-black text-white italic text-lg md:text-base">{label}</span>
+      <div className="absolute bottom-0 right-0 bg-black/80 px-1 text-[10px] font-bold text-white border-t border-l border-white/20">
+        {count}
+      </div>
+    </div>
+    <span className="text-[8px] font-mono mt-1 opacity-50 tracking-widest uppercase" style={{ color }}>{name}</span>
+  </div>
+);
+
+const HUD = ({ health, score, ammo, isReloading, wave, enemiesRemaining, waveCountdown, waveAnnouncement, gameMode, killsInWave, weaponType, powerupCharges, onUsePowerup }: { health: number, score: number, ammo: number, isReloading: boolean, wave: number, enemiesRemaining: number, waveCountdown: number, waveAnnouncement: string | null, gameMode: 'endless' | 'waves', killsInWave: number, weaponType: string, powerupCharges: { health: number, ammo: number }, onUsePowerup: (type: 'health' | 'ammo') => void }) => {
+  const displayHealth = Math.round(health);
   const healthPercent = Math.max(0, Math.min(100, health));
+  const killGoal = 10 + (wave - 1) * 5;
+  const [speedBoostActive, setSpeedBoostActive] = useState(false);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSpeedBoostActive(performance.now() < playerState.speedBoostEndTime);
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
   
   return (
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="absolute inset-0 pointer-events-none z-20 flex flex-col justify-between p-6"
+      className="absolute inset-0 pointer-events-none z-40 flex flex-col justify-between p-6"
     >
       <div className="flex justify-between items-start">
-        {/* Health Bar */}
-        <div className="relative group">
-          <div className="w-48 md:w-64 h-12 bg-black/60 border-2 border-red-900/80 skew-x-[-15deg] overflow-hidden backdrop-blur-md shadow-[0_0_15px_rgba(255,0,0,0.3)]">
-            <motion.div 
-              className="h-full bg-gradient-to-r from-red-800 to-red-500"
-              initial={{ width: '100%' }}
-              animate={{ width: `${healthPercent}%` }}
-              transition={{ type: 'spring', bounce: 0.3 }}
-            />
+        {/* Left Side: Health & Wave */}
+        <div className="flex flex-col gap-4">
+          <div className="relative group">
+            <div className="w-48 md:w-64 h-12 bg-black/60 border-2 border-red-900/80 skew-x-[-15deg] overflow-hidden backdrop-blur-md shadow-[0_0_15px_rgba(255,0,0,0.3)]">
+              <motion.div 
+                className="h-full bg-gradient-to-r from-red-800 to-red-500"
+                initial={{ width: '100%' }}
+                animate={{ width: `${healthPercent}%` }}
+                transition={{ type: 'spring', bounce: 0.3 }}
+              />
+            </div>
+            <div className="absolute inset-0 flex items-center px-6 skew-x-[-15deg]">
+              <motion.span 
+                animate={{ color: displayHealth < 30 ? '#ffaaaa' : '#ffffff' }}
+                className="font-mono font-black text-2xl italic tracking-wider drop-shadow-[0_2px_2px_rgba(0,0,0,1)]"
+              >
+                HP {displayHealth}
+              </motion.span>
+            </div>
           </div>
-          <div className="absolute inset-0 flex items-center px-6 skew-x-[-15deg]">
-            <motion.span 
-              key={`health-${displayHealth}`}
-              initial={{ scale: 1.5, color: '#ffffff' }}
-              animate={{ scale: 1, color: displayHealth < 30 ? '#ffaaaa' : '#ffffff' }}
-              className="font-mono font-black text-2xl italic tracking-wider drop-shadow-[0_2px_2px_rgba(0,0,0,1)]"
+
+          {speedBoostActive && (
+            <motion.div 
+              initial={{ x: -20, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              className="flex items-center gap-2 px-4 py-1 bg-yellow-500/20 border border-yellow-500/50 skew-x-[-15deg] backdrop-blur-md"
             >
-              HP {displayHealth}
-            </motion.span>
+              <div className="skew-x-[15deg] flex items-center gap-2">
+                <div className="w-2 h-2 bg-yellow-400 rounded-full animate-ping" />
+                <span className="font-mono text-[10px] text-yellow-400 font-bold uppercase tracking-widest">Speed Boost Active</span>
+              </div>
+            </motion.div>
+          )}
+
+          <div className="flex gap-2">
+            {gameMode === 'waves' && (
+              <>
+                <div className="px-4 py-1 bg-black/60 border border-white/20 skew-x-[-15deg] backdrop-blur-md">
+                  <div className="skew-x-[15deg] font-mono text-xs text-white/70 uppercase tracking-widest">
+                    Welle <span className="text-white font-bold text-lg">{wave}</span>
+                  </div>
+                </div>
+                <div className="px-4 py-1 bg-black/60 border border-white/20 skew-x-[-15deg] backdrop-blur-md">
+                  <div className="skew-x-[15deg] font-mono text-xs text-white/70 uppercase tracking-widest">
+                    Kills <span className="text-red-500 font-bold text-lg">{killsInWave} / {killGoal}</span>
+                  </div>
+                </div>
+              </>
+            )}
+            {gameMode === 'endless' && (
+              <div className="px-4 py-1 bg-black/60 border border-white/20 skew-x-[-15deg] backdrop-blur-md">
+                <div className="skew-x-[15deg] font-mono text-xs text-white/70 uppercase tracking-widest">
+                  Modus <span className="text-white font-bold text-lg">ENDLOS</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Abilities Display */}
+          <div className="flex gap-4 mt-2">
+            <AbilityIcon 
+              label="Q" 
+              name="SHOCK" 
+              cooldown={10} 
+              abilityKey="q" 
+              color="#00ffff" 
+              onClick={() => (inputRef as any).abilities.q = true}
+            />
+            <AbilityIcon 
+              label="E" 
+              name="SHIELD" 
+              cooldown={20} 
+              abilityKey="e" 
+              color="#aa00ff" 
+              onClick={() => (inputRef as any).abilities.e = true}
+            />
+            <PowerupButton 
+              label="1" 
+              name="MEDKIT" 
+              count={powerupCharges.health} 
+              color="#00ff00" 
+              onClick={() => onUsePowerup('health')}
+            />
+            <PowerupButton 
+              label="2" 
+              name="AMMO" 
+              count={powerupCharges.ammo} 
+              color="#0088ff" 
+              onClick={() => onUsePowerup('ammo')}
+            />
           </div>
         </div>
 
@@ -885,6 +1651,63 @@ const HUD = ({ health, score }: { health: number, score: number }) => {
           </div>
         </div>
       </div>
+
+      {/* Center Messages */}
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center">
+        <AnimatePresence>
+          {waveAnnouncement && (
+            <motion.div
+              initial={{ scale: 0.5, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 1.5, opacity: 0 }}
+              className="text-6xl md:text-8xl font-black text-white italic tracking-tighter drop-shadow-[0_0_30px_rgba(255,255,255,0.5)]"
+            >
+              {waveAnnouncement}
+            </motion.div>
+          )}
+          {waveCountdown > 0 && (
+            <motion.div
+              initial={{ scale: 0, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 2, opacity: 0 }}
+              className="flex flex-col items-center"
+            >
+              <div className="text-white font-mono text-xl tracking-[0.5em] uppercase mb-2">Next Wave In</div>
+              <div className="text-8xl font-black text-yellow-400 drop-shadow-[0_0_30px_rgba(255,255,0,0.5)]">{waveCountdown}</div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* Bottom HUD (Ammo) */}
+      <div className="flex justify-end items-end">
+        <div className="relative">
+          <div className="px-6 py-2 bg-black/60 border-2 border-blue-900/80 skew-x-[-15deg] backdrop-blur-md shadow-[0_0_15px_rgba(0,100,255,0.2)]">
+            <div className="skew-x-[15deg] flex flex-col items-end gap-1">
+              <div className="text-white/50 text-xs font-bold uppercase tracking-wider">{weaponType}</div>
+              {isReloading ? (
+                <motion.div
+                  animate={{ opacity: [1, 0.5, 1] }}
+                  transition={{ repeat: Infinity, duration: 0.5 }}
+                  className="font-mono font-black text-2xl italic tracking-wider text-yellow-400 drop-shadow-[0_0_8px_rgba(255,255,0,0.6)]"
+                >
+                  RELOADING...
+                </motion.div>
+              ) : (
+                <motion.div
+                  key={`ammo-${ammo}`}
+                  initial={{ scale: 1.3, color: '#ffffff' }}
+                  animate={{ scale: 1, color: ammo <= 5 ? '#ff4444' : '#66ccff' }}
+                  className="font-mono font-black text-3xl italic tracking-wider drop-shadow-[0_0_8px_rgba(100,200,255,0.6)]"
+                >
+                  AMMO {ammo}
+                </motion.div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
       {displayHealth > 0 && displayHealth < 40 && (
         <div className="absolute inset-0 shadow-[inset_0_0_150px_rgba(255,0,0,0.4)] animate-pulse pointer-events-none" />
       )}
@@ -892,35 +1715,152 @@ const HUD = ({ health, score }: { health: number, score: number }) => {
   );
 };
 
-const MenuCamera = () => {
-  const { camera } = useThree();
-  useFrame((state) => {
-    const t = state.clock.elapsedTime * 0.2;
-    camera.position.set(Math.cos(t) * 40, 20, Math.sin(t) * 40);
-    camera.lookAt(0, 5, 0);
+// --- MAIN APP ---
+const PauseMenu = ({ onResume, onRestart, onQuit }: { onResume: () => void, onRestart: () => void, onQuit: () => void }) => (
+  <motion.div
+    initial={{ opacity: 0 }}
+    animate={{ opacity: 1 }}
+    exit={{ opacity: 0 }}
+    className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm"
+  >
+    <h2 className="text-5xl font-black text-white mb-8">PAUSED</h2>
+    <div className="flex flex-col gap-4">
+      <button onClick={onResume} className="px-8 py-4 bg-green-600 text-white text-xl font-bold rounded-xl">RESUME</button>
+      <FullscreenButton isInline />
+      <button onClick={onRestart} className="px-8 py-4 bg-blue-600 text-white text-xl font-bold rounded-xl">RESTART</button>
+      <button onClick={onQuit} className="px-8 py-4 bg-red-600 text-white text-xl font-bold rounded-xl">QUIT</button>
+    </div>
+  </motion.div>
+);
+
+// --- DRONE COMPONENT ---
+const Drone = ({ index, totalDrones }: { index: number, totalDrones: number }) => {
+  const droneRef = useRef<THREE.Group>(null);
+  const lastShootTime = useRef(0);
+  
+  useFrame((state, delta) => {
+    if (!droneRef.current || playerState.gameState !== 'playing') return;
+    
+    const time = state.clock.elapsedTime;
+    
+    // Calculate target position around player
+    const angle = (index / totalDrones) * Math.PI * 2 + time * 1.5;
+    const radius = 2.5;
+    const targetX = playerState.pos.x + Math.cos(angle) * radius;
+    const targetZ = playerState.pos.z + Math.sin(angle) * radius;
+    const targetY = playerState.pos.y + 1.5 + Math.sin(time * 3 + index) * 0.3;
+    
+    // Move drone towards target position smoothly
+    droneRef.current.position.lerp(new THREE.Vector3(targetX, targetY, targetZ), 0.1);
+    
+    // Find closest enemy
+    let closestEnemy: any = null;
+    let closestDist = Infinity;
+    
+    enemiesData.forEach((e) => {
+      const dist = e.pos.distanceTo(droneRef.current!.position);
+      if (dist < 20 && dist < closestDist) {
+        closestDist = dist;
+        closestEnemy = e;
+      }
+    });
+    
+    if (closestEnemy) {
+      // Look at enemy
+      const targetRotation = new THREE.Vector3(closestEnemy.pos.x, closestEnemy.pos.y + 0.5, closestEnemy.pos.z);
+      droneRef.current.lookAt(targetRotation);
+      
+      // Shoot
+      if (time - lastShootTime.current > 1.0) { // Drone shoots every 1 second
+        lastShootTime.current = time;
+        const shootDir = new THREE.Vector3().subVectors(
+          targetRotation,
+          droneRef.current.position
+        ).normalize();
+        
+        // Add a bit of spread
+        shootDir.x += (Math.random() - 0.5) * 0.1;
+        shootDir.y += (Math.random() - 0.5) * 0.1;
+        shootDir.z += (Math.random() - 0.5) * 0.1;
+        shootDir.normalize();
+        
+        spawnBullet(droneRef.current.position.clone().add(shootDir.multiplyScalar(0.5)), shootDir, 25, true, 15, 0.5);
+        // We can skip sound for drone to avoid audio clutter, or play a quieter sound
+      }
+    } else {
+      // Look at moving direction or just rotate
+      droneRef.current.rotation.y += delta;
+    }
   });
-  return null;
+
+  return (
+    <group ref={droneRef}>
+      <mesh castShadow>
+        <sphereGeometry args={[0.2, 16, 16]} />
+        <meshStandardMaterial color="#00ffff" emissive="#00ffff" emissiveIntensity={0.8} wireframe />
+      </mesh>
+      <mesh position={[0, 0, 0.2]}>
+        <cylinderGeometry args={[0.05, 0.05, 0.3]} />
+        <meshStandardMaterial color="#333" />
+      </mesh>
+      <pointLight color="#00ffff" intensity={1} distance={3} />
+    </group>
+  );
 };
 
-// --- MAIN APP ---
 export default function ShooterGame() {
   const bloodSystem = useRef(null);
+  const playerBodyRef = useRef<any>(null);
   const [health, setHealth] = useState(100);
-  const [gameState, setGameState] = useState<'menu' | 'playing' | 'gameover'>('menu');
+  const [ammo, setAmmo] = useState(30);
+  const [isReloading, setIsReloading] = useState(false);
+  const [gameState, setGameState] = useState<'menu' | 'playing' | 'gameover' | 'paused'>('menu');
   const [gameKey, setGameKey] = useState(0);
   const [damageFlash, setDamageFlash] = useState(false);
   const [score, setScore] = useState(0);
   const [highscore, setHighscore] = useState(() => parseInt(localStorage.getItem('cyber_arena_highscore') || '0', 10));
-  const [gameMode, setGameMode] = useState<'normal' | 'hardcore'>('normal');
+  const [gameMode, setGameMode] = useState<'endless' | 'waves'>('endless');
+  const [wave, setWave] = useState(1);
+  const [waveCountdown, setWaveCountdown] = useState(0);
+  const [enemiesRemaining, setEnemiesRemaining] = useState(0);
+  const [killsInWave, setKillsInWave] = useState(0);
+  const [waveAnnouncement, setWaveAnnouncement] = useState<string | null>(null);
+  const [weaponType, setWeaponType] = useState<string>('pistol');
+  const [powerupCharges, setPowerupCharges] = useState({ health: 10, ammo: 10 });
+
+  const handleUsePowerup = useCallback((type: 'health' | 'ammo') => {
+    if (powerupCharges[type] <= 0) return;
+
+    setPowerupCharges(prev => ({ ...prev, [type]: prev[type] - 1 }));
+    soundManager.playReload();
+
+    if (type === 'health') {
+      playerState.health = Math.min(100, playerState.health + 30);
+      setHealth(playerState.health);
+    } else if (type === 'ammo') {
+      playerState.ammo = playerState.maxAmmo;
+      setAmmo(playerState.ammo);
+    }
+  }, [powerupCharges]);
+
+  const handleTeleport = (target: [number, number, number]) => {
+    if (playerBodyRef.current) {
+      playerBodyRef.current.setTranslation({ x: target[0], y: target[1], z: target[2] }, true);
+      soundManager.playShoot(); // Reuse shoot sound for teleport for now
+    }
+  };
 
   useEffect(() => {
+    playerState.gameState = gameState;
     if (health <= 0 && gameState === 'playing') {
       setGameState('gameover');
+      soundManager.playGameOver();
       if (score > highscore) {
         setHighscore(score);
         localStorage.setItem('cyber_arena_highscore', score.toString());
       }
-      document.exitPointerLock?.();
+      // Save score to local storage only
+      localStorage.setItem('cyber_arena_highscore', score.toString());
     }
   }, [health, gameState, score, highscore]);
 
@@ -931,7 +1871,11 @@ export default function ShooterGame() {
       if (key === 'a') inputRef.keys.a = true;
       if (key === 's') inputRef.keys.s = true;
       if (key === 'd') inputRef.keys.d = true;
-      if (key === ' ') inputRef.keys.space = true;
+      if (key === 'r') inputRef.keys.r = true;
+      if (key === 'q') inputRef.keys.q = true;
+      if (key === 'e') inputRef.keys.e = true;
+      if (key === '1') handleUsePowerup('health');
+      if (key === '2') handleUsePowerup('ammo');
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
@@ -939,98 +1883,184 @@ export default function ShooterGame() {
       if (key === 'a') inputRef.keys.a = false;
       if (key === 's') inputRef.keys.s = false;
       if (key === 'd') inputRef.keys.d = false;
-      if (key === ' ') inputRef.keys.space = false;
+      if (key === 'r') inputRef.keys.r = false;
+      if (key === 'q') inputRef.keys.q = false;
+      if (key === 'e') inputRef.keys.e = false;
+    };
+    const handleMouseMove = (e: MouseEvent) => {
+      inputRef.mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+      inputRef.mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
     };
     const handleMouseDown = (e: MouseEvent) => {
-      if (e.button === 0 && document.pointerLockElement) {
-        inputRef.isShooting = true;
-      }
+      if (e.button === 0) inputRef.isShooting = true;
     };
     const handleMouseUp = (e: MouseEvent) => {
       if (e.button === 0) inputRef.isShooting = false;
     };
-    const handleMouseMove = (e: MouseEvent) => {
-      if (document.pointerLockElement) {
-        inputRef.lookDelta.x += e.movementX * 0.002;
-        inputRef.lookDelta.y += e.movementY * 0.002;
-      }
-    };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('mouseup', handleMouseUp);
-    window.addEventListener('mousemove', handleMouseMove);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('mouseup', handleMouseUp);
-      window.removeEventListener('mousemove', handleMouseMove);
     };
-  }, []);
+  }, [handleUsePowerup]);
 
-  const startGame = (mode: 'normal' | 'hardcore' = 'normal') => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (gameState === 'playing') {
+          setGameState('paused');
+        } else if (gameState === 'paused') {
+          setGameState('playing');
+        }
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden && gameState === 'playing') {
+        setGameState('paused');
+      }
+    };
+    const handleOrientationChange = () => {
+      if (window.innerHeight > window.innerWidth && gameState === 'playing') {
+        setGameState('paused');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('orientationchange', handleOrientationChange);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('orientationchange', handleOrientationChange);
+    };
+  }, [gameState]);
+
+  const startGame = (mode: 'endless' | 'waves' = 'endless') => {
+    soundManager.init();
     setGameMode(mode);
     setScore(0);
     setHealth(100);
+    setAmmo(30);
+    setIsReloading(false);
     playerState.health = 100;
+    playerState.ammo = 30;
+    playerState.maxAmmo = 30;
+    playerState.weapon = 'pistol';
+    playerState.isReloading = false;
+    playerState.speedBoostEndTime = 0;
     bullets.forEach(b => b.active = false);
     enemiesData.clear();
     inputRef.move = { x: 0, y: 0 };
-    inputRef.lookDelta = { x: 0, y: 0 };
+    inputRef.aim = { x: 0, y: 0 };
     inputRef.isShooting = false;
+    inputRef.isMobileAiming = false;
     inputRef.justShot = false;
     setGameKey(k => k + 1);
+    setWave(1);
+    setPowerupCharges({ health: 10, ammo: 10 });
+    setWaveCountdown(0);
+    setEnemiesRemaining(0);
+    setKillsInWave(0);
+    setWeaponType('pistol');
     setGameState('playing');
   };
 
   return (
-    <div 
-      className="w-full h-screen bg-black overflow-hidden relative"
-      onClick={() => {
-        if (gameState === 'playing' && !document.pointerLockElement) {
-          document.body.requestPointerLock?.();
-        }
-      }}
-    >
+    <div className="w-full h-screen bg-black overflow-hidden relative select-none cursor-crosshair">
+      {gameState !== 'playing' && <FullscreenButton />}
+      <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md text-white portrait:flex landscape:hidden">
+        <svg className="w-24 h-24 mb-6 animate-pulse text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+        <h2 className="text-3xl font-black tracking-widest text-center px-4">PLEASE ROTATE<br/>YOUR DEVICE</h2>
+        <p className="mt-4 text-gray-400 font-mono text-center px-8">This game is designed for landscape mode.</p>
+      </div>
+
       <AnimatePresence mode="wait">
         {gameState === 'menu' && <MainMenu key="menu" onStart={startGame} highscore={highscore} />}
+        {gameState === 'paused' && <PauseMenu key="paused" onResume={() => setGameState('playing')} onRestart={() => startGame(gameMode)} onQuit={() => setGameState('menu')} />}
         {gameState === 'gameover' && <GameOver key="gameover" onRestart={() => startGame(gameMode)} onMenu={() => setGameState('menu')} score={score} highscore={highscore} />}
-        {gameState === 'playing' && <HUD key="hud" health={health} score={score} />}
+        {gameState === 'playing' && (
+          <>
+            <HUD 
+              key="hud" 
+              health={health} 
+              score={score} 
+              ammo={ammo} 
+              isReloading={isReloading} 
+              wave={wave} 
+              enemiesRemaining={enemiesRemaining} 
+              waveCountdown={waveCountdown} 
+              waveAnnouncement={waveAnnouncement} 
+              gameMode={gameMode} 
+              killsInWave={killsInWave} 
+              weaponType={weaponType} 
+              powerupCharges={powerupCharges}
+              onUsePowerup={handleUsePowerup}
+            />
+            <Minimap />
+          </>
+        )}
       </AnimatePresence>
       {damageFlash && <div className="absolute inset-0 bg-red-600/40 pointer-events-none z-20 animate-pulse" />}
+      {isReloading && <div className="absolute inset-0 bg-yellow-500/30 pointer-events-none z-20 animate-pulse" />}
       
-      <Canvas shadows>
-        <color attach="background" args={['#1a1a2e']} />
-        <fog attach="fog" args={['#1a1a2e', 15, 120]} />
-        <ambientLight intensity={1.5} />
-        <directionalLight position={[20, 40, 20]} castShadow intensity={3} color="#ffffff" />
-        <pointLight position={[0, 20, 0]} intensity={4} color="#ff0055" distance={80} />
+      {useMemo(() => (
+        <Canvas shadows camera={{ position: [0, 35, 15], fov: 40 }}>
+          <color attach="background" args={['#0a0a1a']} />
+          <fog attach="fog" args={['#0a0a1a', 20, 80]} />
+          <ambientLight intensity={1.5} />
+          <directionalLight position={[20, 40, 20]} castShadow intensity={3} color="#ffffff" />
+          <pointLight position={[0, 20, 0]} intensity={4} color="#ff0055" distance={80} />
 
-        {gameState !== 'playing' && <MenuCamera />}
+          <Physics gravity={[0, -30, 0]}>
+            <Arena onTeleport={handleTeleport} bloodSystem={bloodSystem} />
+            <BulletManager bloodSystem={bloodSystem} />
+            {gameState === 'playing' && (
+              <group key={gameKey}>
+                <Player 
+                  setHealth={setHealth} 
+                  setDamageFlash={setDamageFlash} 
+                  setAmmo={setAmmo} 
+                  setIsReloading={setIsReloading} 
+                  bodyRef={playerBodyRef}
+                />
+                <GameManager 
+                  bloodSystem={bloodSystem} 
+                  gameMode={gameMode} 
+                  setScore={setScore} 
+                  wave={wave} 
+                  setWave={setWave} 
+                  setWaveCountdown={setWaveCountdown} 
+                  waveCountdown={waveCountdown}
+                  setEnemiesRemaining={setEnemiesRemaining} 
+                  setWaveAnnouncement={setWaveAnnouncement}
+                  setKillsInWave={setKillsInWave}
+                  killsInWave={killsInWave}
+                  setWeaponType={setWeaponType}
+                />
+                {Array.from({ length: Math.min(5, Math.floor(Math.max(score, highscore) / 100)) }).map((_, i, arr) => (
+                  <Drone key={`drone-${i}`} index={i} totalDrones={arr.length} />
+                ))}
+              </group>
+            )}
+          </Physics>
 
-        <Physics gravity={[0, -20, 0]}>
-          <EpicMap />
-          {gameState === 'playing' && (
-            <group key={gameKey}>
-              <Player setHealth={setHealth} setDamageFlash={setDamageFlash} />
-              <GameManager bloodSystem={bloodSystem} gameMode={gameMode} setScore={setScore} />
-            </group>
-          )}
-        </Physics>
+          <BloodParticles ref={bloodSystem} />
+        </Canvas>
+      ), [gameState, gameKey, gameMode, wave, killsInWave, score, highscore, waveCountdown])}
 
-        {gameState === 'playing' && <Weapon />}
-        <BulletManager bloodSystem={bloodSystem} />
-        <BloodParticles ref={bloodSystem} />
-      </Canvas>
-
-      {gameState === 'playing' && <MobileControls />}
-
-      {gameState === 'playing' && (
-        <div className="absolute top-1/2 left-1/2 w-2 h-2 bg-white/80 rounded-full -translate-x-1/2 -translate-y-1/2 pointer-events-none mix-blend-difference" />
-      )}
+      {gameState === 'playing' && <MobileControls setGameState={setGameState} />}
     </div>
   );
 }
