@@ -43,6 +43,11 @@ export class SoundManager {
     this.playTone(60, 'sawtooth', 0.5, 0.2);
     this.playTone(100, 'square', 0.3, 0.1);
   }
+  playPowerup() {
+    this.playTone(400, 'sine', 0.1, 0.1);
+    setTimeout(() => this.playTone(600, 'sine', 0.1, 0.1), 100);
+    setTimeout(() => this.playTone(800, 'sine', 0.2, 0.1), 200);
+  }
 }
 
 export const soundManager = new SoundManager();

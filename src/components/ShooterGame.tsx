@@ -1,12 +1,124 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Sphere, Box, Cylinder } from '@react-three/drei';
-import { Physics, RigidBody, CapsuleCollider, useRapier } from '@react-three/rapier';
+import { Physics, RigidBody, CapsuleCollider, CuboidCollider, useRapier } from '@react-three/rapier';
 import * as THREE from 'three';
 import * as RAPIER from '@dimforge/rapier3d-compat';
 import { soundManager } from '../lib/sound';
 import { motion, AnimatePresence } from 'motion/react';
 import { Maximize, Minimize } from 'lucide-react';
+
+// --- TUTORIAL ---
+const TUTORIAL_STEPS = {
+  en: [
+    { title: "WELCOME TO CYBER ARENA", text: "Let's get you ready for combat. This tutorial will guide you through the basics.", isAction: false },
+    { title: "MOVEMENT", text: "Try it now: Use WASD keys to move your character. On mobile, use the left joystick.", isAction: true },
+    { title: "AIMING & SHOOTING", text: "Try it now: Use your MOUSE to aim and LEFT CLICK to shoot. On mobile, use the right joystick.", isAction: true },
+    { title: "WEAPON SYSTEM", text: "Enemies have a chance to drop weapons like Shotguns or Machine Guns. Walk over them to pick them up!", isAction: true },
+    { title: "RELOADING", text: "Try it now: Press R to reload manually. Your ammo is shown in the bottom right.", isAction: true },
+    { title: "ABILITIES", text: "Try it now: Press Q for a Shockwave and E for a Shield. Watch the cooldowns!", isAction: true },
+    { title: "HEALTH & POWERUPS", text: "Restore HP by picking up green Health Packs from enemies or clicking the Health icon on your HUD.", isAction: true },
+    { title: "DRONES", text: "As your score increases, support drones will automatically spawn to assist you in combat.", isAction: false },
+    { title: "DIMENSION PORTALS", text: "Look for the purple rings. They allow you to switch between different arenas.", isAction: false },
+    { title: "READY FOR COMBAT", text: "Tutorial complete! Enemies are about to spawn. Good luck, soldier!", isAction: false }
+  ],
+  de: [
+    { title: "WILLKOMMEN IN DER CYBER ARENA", text: "Bereiten wir dich auf den Kampf vor. Dieses Tutorial führt dich durch die Grundlagen.", isAction: false },
+    { title: "BEWEGUNG", text: "Probier es aus: Nutze die WASD-Tasten zum Bewegen. Auf dem Handy nutzt du den linken Joystick.", isAction: true },
+    { title: "ZIELEN & SCHIESSEN", text: "Probier es aus: Nutze die MAUS zum Zielen und LINKSKLICK zum Schießen. Auf dem Handy nutzt du den rechten Joystick.", isAction: true },
+    { title: "WAFFENSYSTEM", text: "Gegner können Waffen wie Schrotflinten oder Maschinengewehre fallen lassen. Laufe darüber, um sie aufzusammeln!", isAction: true },
+    { title: "NACHLADEN", text: "Probier es aus: Drücke R zum manuellen Nachladen. Deine Munition siehst du unten rechts.", isAction: true },
+    { title: "FÄHIGKEITEN", text: "Probier es aus: Drücke Q für eine Schockwelle und E für einen Schild. Achte auf die Abklingzeiten!", isAction: true },
+    { title: "GESUNDHEIT & POWERUPS", text: "Stelle HP wieder her, indem du grüne Medipacks von Gegnern aufsammelst oder auf das Herz-Symbol im HUD klickst.", isAction: true },
+    { title: "DROHNEN", text: "Wenn dein Score steigt, erscheinen automatisch Drohnen, die dich im Kampf unterstützen.", isAction: false },
+    { title: "DIMENSIONS-PORTALE", text: "Suche nach den lila Ringen. Sie ermöglichen den Wechsel zwischen verschiedenen Arenen.", isAction: false },
+    { title: "BEREIT FÜR DEN KAMPF", text: "Tutorial beendet! Die Gegner werden gleich erscheinen. Viel Glück, Soldat!", isAction: false }
+  ]
+};
+
+const TutorialOverlay = ({ onComplete, onSkip, step, setStep, language, setLanguage, isHidden, setIsHidden }: { onComplete: () => void, onSkip: () => void, step: number, setStep: (s: number | ((s: number) => number)) => void, language: 'en' | 'de' | null, setLanguage: (l: 'en' | 'de') => void, isHidden: boolean, setIsHidden: (h: boolean) => void }) => {
+  if (!language) {
+    return (
+      <div className="absolute inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm pointer-events-auto">
+        <motion.div 
+          initial={{ scale: 0.9, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          className="bg-gray-900 border-2 border-cyan-500 p-8 rounded-2xl max-w-md w-full text-center shadow-[0_0_30px_rgba(6,182,212,0.3)]"
+        >
+          <h2 className="text-3xl font-black text-cyan-400 mb-8 tracking-tighter">SELECT LANGUAGE</h2>
+          <div className="flex gap-4 justify-center">
+            <button 
+              onClick={() => { setLanguage('en'); soundManager.playMenuClick(); }}
+              className="px-8 py-4 bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl transition-all hover:scale-105 active:scale-95"
+            >
+              ENGLISH
+            </button>
+            <button 
+              onClick={() => { setLanguage('de'); soundManager.playMenuClick(); }}
+              className="px-8 py-4 bg-fuchsia-600 hover:bg-fuchsia-500 text-white font-bold rounded-xl transition-all hover:scale-105 active:scale-95"
+            >
+              DEUTSCH
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  const currentSteps = TUTORIAL_STEPS[language];
+  const currentStep = currentSteps[step];
+
+  const nextStep = () => {
+    if (step < currentSteps.length - 1) {
+      setStep(s => s + 1);
+      soundManager.playMenuClick();
+    } else {
+      onComplete();
+    }
+  };
+
+  if (isHidden) return null;
+
+  return (
+    <div className="absolute inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-[2px] pointer-events-none">
+      <motion.div 
+        key={step}
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="relative bg-gray-900 border-2 border-cyan-500 p-8 rounded-2xl max-w-md w-full text-center pointer-events-auto shadow-[0_0_50px_rgba(6,182,212,0.3)]"
+      >
+        <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-cyan-500 text-black font-black px-4 py-1 rounded-lg text-xs tracking-widest uppercase">
+          TUTORIAL {step + 1}/{currentSteps.length}
+        </div>
+        
+        <h3 className="text-2xl font-black text-white mb-2 tracking-tight uppercase italic">{currentStep.title}</h3>
+        <p className="text-gray-300 text-base leading-relaxed mb-8 font-medium">{currentStep.text}</p>
+        
+        <div className="flex flex-col gap-4">
+          <div className="flex gap-4">
+            <button 
+              onClick={onSkip}
+              className="flex-1 px-4 py-3 text-gray-500 hover:text-white font-bold text-xs tracking-widest transition-colors uppercase border border-white/10 rounded-xl"
+            >
+              {language === 'en' ? 'Skip' : 'Überspringen'}
+            </button>
+            
+            <button 
+              onClick={currentStep.isAction ? () => setIsHidden(true) : nextStep}
+              className="flex-[2] px-8 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-black rounded-xl transition-all hover:scale-105 active:scale-95 shadow-[0_0_20px_rgba(6,182,212,0.4)] uppercase tracking-tighter"
+            >
+              {currentStep.isAction 
+                ? (language === 'en' ? 'Try it now' : 'Jetzt ausprobieren')
+                : (step === currentSteps.length - 1 
+                  ? (language === 'en' ? 'Start Game' : 'Spiel starten') 
+                  : (language === 'en' ? 'Next' : 'Weiter'))}
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
 
 // --- FULLSCREEN BUTTON ---
 const FullscreenButton = ({ isInline = false }: { isInline?: boolean }) => {
@@ -162,29 +274,29 @@ const Minimap = () => {
           const pos = toMapCoord(t);
           return (
             <div 
-              key={i} 
+              key={`tele-${i}`} 
               className="absolute w-1.5 h-1.5 bg-cyan-400 rounded-full -translate-x-1/2 -translate-y-1/2 animate-pulse shadow-[0_0_8px_#00ffff]"
               style={{ left: pos.x, top: pos.y }}
             />
           );
         })}
-
+        
         {/* Jump Pads */}
         {jumpPads.map((t, i) => {
           const pos = toMapCoord(t);
-          return <div key={`jp-${i}`} className="absolute w-1.5 h-1.5 bg-orange-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
+          return <div key={`minimap-jp-${i}`} className="absolute w-1.5 h-1.5 bg-orange-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
         })}
 
         {/* Speed Pads */}
         {speedPads.map((t, i) => {
           const pos = toMapCoord(t);
-          return <div key={`sp-${i}`} className="absolute w-1.5 h-1.5 bg-green-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
+          return <div key={`minimap-sp-${i}`} className="absolute w-1.5 h-1.5 bg-green-400 rounded-sm -translate-x-1/2 -translate-y-1/2 opacity-60" style={{ left: pos.x, top: pos.y }} />
         })}
 
         {/* Barrels */}
         {barrels.map((b, i) => {
           const pos = toMapCoord(b);
-          return <div key={`b-${i}`} className="absolute w-1.5 h-1.5 bg-orange-500 rounded-full -translate-x-1/2 -translate-y-1/2 opacity-80" style={{ left: pos.x, top: pos.y }} />
+          return <div key={`minimap-b-${i}`} className="absolute w-1.5 h-1.5 bg-orange-500 rounded-full -translate-x-1/2 -translate-y-1/2 opacity-80" style={{ left: pos.x, top: pos.y }} />
         })}
 
         {/* Enemies */}
@@ -192,7 +304,7 @@ const Minimap = () => {
           const pos = toMapCoord(e);
           return (
             <div 
-              key={i} 
+              key={`enemy-${i}`} 
               className="absolute w-1 h-1 bg-red-500 rounded-full -translate-x-1/2 -translate-y-1/2 shadow-[0_0_5px_#ff0000]"
               style={{ left: pos.x, top: pos.y }}
             />
@@ -557,38 +669,213 @@ const ExplosiveBarrel = ({ id, position, bloodSystem }: any) => {
   );
 };
 
+const ApartmentFurniture = () => {
+  return (
+    <group>
+      {/* Furniture on Ground Floor (y = 0.5 is the floor surface) */}
+      {/* Bed */}
+      <RigidBody type="fixed" position={[-50, 1.5, -70]}>
+        <Box args={[15, 2, 25]} receiveShadow castShadow>
+          <meshStandardMaterial color="#113355" />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[-50, 3, -81]}>
+        <Box args={[15, 4, 2]} receiveShadow castShadow>
+          <meshStandardMaterial color="#442211" />
+        </Box>
+      </RigidBody>
+
+      {/* Desk */}
+      <RigidBody type="fixed" position={[50, 2.5, -80]}>
+        <Box args={[30, 1, 10]} receiveShadow castShadow>
+          <meshStandardMaterial color="#553322" />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[40, 1.5, -80]}>
+        <Box args={[2, 2, 8]} receiveShadow castShadow>
+          <meshStandardMaterial color="#222222" />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[60, 1.5, -80]}>
+        <Box args={[2, 2, 8]} receiveShadow castShadow>
+          <meshStandardMaterial color="#222222" />
+        </Box>
+      </RigidBody>
+
+      {/* Computer Monitor */}
+      <RigidBody type="fixed" position={[50, 6.5, -82]}>
+        <Box args={[12, 7, 1]} receiveShadow castShadow>
+          <meshStandardMaterial color="#111111" />
+        </Box>
+        <Box args={[11, 6, 1.2]} position={[0, 0, 0]}>
+          <meshStandardMaterial color="#00ffcc" emissive="#00ffcc" emissiveIntensity={1.5} />
+        </Box>
+      </RigidBody>
+      
+      {/* Wardrobe */}
+      <RigidBody type="fixed" position={[0, 5.5, -84]}>
+        <Box args={[20, 10, 8]} receiveShadow castShadow>
+          <meshStandardMaterial color="#3a2a1a" />
+        </Box>
+      </RigidBody>
+      
+      {/* Couch */}
+      <RigidBody type="fixed" position={[0, 1.5, -40]}>
+        <Box args={[25, 2, 10]} receiveShadow castShadow>
+          <meshStandardMaterial color="#551111" />
+        </Box>
+      </RigidBody>
+      <RigidBody type="fixed" position={[0, 3, -44]}>
+        <Box args={[25, 4, 2]} receiveShadow castShadow>
+          <meshStandardMaterial color="#551111" />
+        </Box>
+      </RigidBody>
+    </group>
+  );
+};
+
+const TextSprite = ({ text, position }: { text: string, position: [number, number, number] }) => {
+  const canvas = useMemo(() => {
+    const c = document.createElement('canvas');
+    c.width = 512;
+    c.height = 128;
+    const ctx = c.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = 'transparent';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.font = 'bold 48px monospace';
+      ctx.fillStyle = '#ff88ff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#cc00ff';
+      ctx.shadowBlur = 15;
+      ctx.fillText(text, c.width / 2, c.height / 2);
+    }
+    return c;
+  }, [text]);
+
+  const texture = useMemo(() => {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    return tex;
+  }, [canvas]);
+
+  return (
+    <sprite position={position} scale={[12, 3, 1]}>
+      <spriteMaterial map={texture} transparent />
+    </sprite>
+  );
+};
+
+const DimensionPortal = ({ position, onPortalEnter, portalUsesLeft }: any) => {
+  const ref = useRef<THREE.Mesh>(null);
+  useFrame((state) => {
+    if (ref.current) {
+      ref.current.rotation.y += 0.02;
+      ref.current.rotation.x += 0.01;
+    }
+  });
+  return (
+    <group position={position}>
+      <RigidBody type="fixed" colliders={false}>
+        <CuboidCollider args={[4, 4, 4]} sensor onIntersectionEnter={(e) => {
+          if (e.other.rigidBodyObject?.userData?.isPlayer) {
+            onPortalEnter();
+          }
+        }} />
+        <mesh ref={ref}>
+          <torusGeometry args={[3, 0.8, 16, 32]} />
+          <meshStandardMaterial color="#cc00ff" emissive="#cc00ff" emissiveIntensity={2} wireframe />
+        </mesh>
+        <pointLight color="#cc00ff" intensity={5} distance={20} />
+      </RigidBody>
+      <TextSprite text={`PORTALS: ${portalUsesLeft}/5`} position={[0, 6, 0]} />
+    </group>
+  );
+};
+
 // --- ARENA MAP ---
-const Arena = ({ onTeleport, bloodSystem }: any) => {
+const Arena = ({ onTeleport, bloodSystem, mapType, onPortalEnter, portalUsesLeft }: any) => {
+  const mapConfig = useMemo(() => {
+    switch (mapType) {
+      case 'military':
+        return {
+          floor: '#1a221a', grid: '#00ff00', gridBg: '#0a110a', wall: '#0a110a',
+          obs1: '#2a332a', obs2: '#1f261f',
+          obsTypes: ['box', 'cylinder']
+        };
+      case 'factory':
+        return {
+          floor: '#2a1100', grid: '#ff8800', gridBg: '#1a0a00', wall: '#1a0a00',
+          obs1: '#4a2200', obs2: '#3a1a00',
+          obsTypes: ['cylinder', 'cylinder', 'box'] // more cylinders for pipes/tanks
+        };
+      case 'apartment':
+        return {
+          floor: '#2a2a3a', grid: '#4444ff', gridBg: '#1a1a2a', wall: '#111122',
+          obs1: '#3a3a4a', obs2: '#2a2a3a',
+          obsTypes: ['box'] // mostly boxes for indoor feel
+        };
+      case 'city':
+      default:
+        return {
+          floor: '#222222', grid: '#880000', gridBg: '#111111', wall: '#111111',
+          obs1: '#333333', obs2: '#444444',
+          obsTypes: ['box', 'box', 'cylinder'] // more boxes for buildings
+        };
+    }
+  }, [mapType]);
+
   const obstacles = useMemo(() => {
     const obs = [];
-    const seed = 12345;
+    const seed = mapType === 'city' ? 123 : mapType === 'military' ? 456 : mapType === 'apartment' ? 101 : 789;
     const pseudoRandom = (s: number) => {
       const x = Math.sin(s) * 10000;
       return x - Math.floor(x);
     };
 
-    for (let i = 0; i < 15; i++) {
+    const criticalPoints = [
+      [0,0], // spawn
+      [-80,-80], [80,80], [-80,80], [80,-80], // teleporters
+      [-40,-40], [40,40], [-40,40], [40,-40], [0,-60], [0,60], // jump pads
+      [-60,0], [60,0], [0,-30], [0,30], // speed pads
+      [0,80] // dimension portal
+    ];
+
+    for (let i = 0; i < 25; i++) {
       const x = (pseudoRandom(seed + i * 13) - 0.5) * 180;
       const z = (pseudoRandom(seed + i * 17) - 0.5) * 180;
-      if (Math.abs(x) < 15 && Math.abs(z) < 15) continue; // Keep spawn clear
       
-      const type = pseudoRandom(seed + i * 19) > 0.5 ? 'box' : 'cylinder';
-      const w = 4 + pseudoRandom(seed + i * 23) * 8;
-      const h = 2 + pseudoRandom(seed + i * 29) * 4;
-      const d = 4 + pseudoRandom(seed + i * 31) * 8;
+      let tooClose = false;
+      for (const [cx, cz] of criticalPoints) {
+        if (Math.hypot(x - cx, z - cz) < 18) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
       
-      obs.push({ x, z, type, w, h, d });
+      if (mapType === 'apartment' && z < 20) continue; // Keep the back half clear for the 2nd floor and ramps
+      
+      const typeIndex = Math.floor(pseudoRandom(seed + i * 19) * mapConfig.obsTypes.length);
+      const type = mapConfig.obsTypes[typeIndex];
+      const w = 4 + pseudoRandom(seed + i * 23) * 12;
+      const h = 2 + pseudoRandom(seed + i * 29) * 8;
+      const d = 4 + pseudoRandom(seed + i * 31) * 12;
+      const color = pseudoRandom(seed + i * 37) > 0.5 ? mapConfig.obs1 : mapConfig.obs2;
+      
+      obs.push({ x, z, type, w, h, d, color });
     }
     return obs;
-  }, []);
+  }, [mapType, mapConfig]);
 
   const barrels = useMemo(() => {
-    return Array.from({ length: 8 }).map((_, i) => ({
+    return Array.from({ length: 12 }).map((_, i) => ({
       id: i,
       x: (Math.random() - 0.5) * 160,
       z: (Math.random() - 0.5) * 160,
     })).filter(b => Math.abs(b.x) > 15 || Math.abs(b.z) > 15);
-  }, []);
+  }, [mapType]);
 
   const jumpPads = useMemo(() => [
     [-40, 0.1, -40],
@@ -611,30 +898,30 @@ const Arena = ({ onTeleport, bloodSystem }: any) => {
       {/* Main Floor */}
       <RigidBody type="fixed" position={[0, -0.5, 0]} friction={0.1}>
         <Box args={[200, 1, 200]} receiveShadow>
-          <meshStandardMaterial color="#0a0a1a" roughness={0.8} metalness={0.2} />
+          <meshStandardMaterial color={mapConfig.floor} roughness={0.9} metalness={0.1} />
         </Box>
-        <gridHelper args={[200, 100, '#ff0055', '#222244']} position={[0, 0.51, 0]} />
+        <gridHelper args={[200, 100, mapConfig.grid, mapConfig.gridBg]} position={[0, 0.51, 0]} />
       </RigidBody>
       
       {/* Boundary Walls */}
       <RigidBody type="fixed" position={[0, 4, -100]}>
         <Box args={[200, 8, 4]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+          <meshStandardMaterial color={mapConfig.wall} roughness={1} />
         </Box>
       </RigidBody>
       <RigidBody type="fixed" position={[0, 4, 100]}>
         <Box args={[200, 8, 4]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+          <meshStandardMaterial color={mapConfig.wall} roughness={1} />
         </Box>
       </RigidBody>
       <RigidBody type="fixed" position={[-100, 4, 0]}>
         <Box args={[4, 8, 200]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+          <meshStandardMaterial color={mapConfig.wall} roughness={1} />
         </Box>
       </RigidBody>
       <RigidBody type="fixed" position={[100, 4, 0]}>
         <Box args={[4, 8, 200]} receiveShadow castShadow>
-          <meshStandardMaterial color="#1f1f2e" roughness={1} />
+          <meshStandardMaterial color={mapConfig.wall} roughness={1} />
         </Box>
       </RigidBody>
 
@@ -642,12 +929,12 @@ const Arena = ({ onTeleport, bloodSystem }: any) => {
       {obstacles.map((o, i) => (
         <RigidBody key={i} type="fixed" position={[o.x, o.h / 2, o.z]}>
           {o.type === 'box' ? (
-            <Box args={[o.w, o.h, o.d]}>
-              <meshStandardMaterial color="#2a2a3a" />
+            <Box args={[o.w, o.h, o.d]} receiveShadow castShadow>
+              <meshStandardMaterial color={o.color} roughness={0.8} />
             </Box>
           ) : (
-            <Cylinder args={[o.w / 2, o.w / 2, o.h, 16]}>
-              <meshStandardMaterial color="#2a2a3a" />
+            <Cylinder args={[o.w / 2, o.w / 2, o.h, 16]} receiveShadow castShadow>
+              <meshStandardMaterial color={o.color} roughness={0.8} />
             </Cylinder>
           )}
         </RigidBody>
@@ -673,6 +960,11 @@ const Arena = ({ onTeleport, bloodSystem }: any) => {
       <Teleporter position={[80, 0.1, 80]} target={[-80, 2, -80]} onTeleport={onTeleport} />
       <Teleporter position={[-80, 0.1, 80]} target={[80, 2, -80]} onTeleport={onTeleport} />
       <Teleporter position={[80, 0.1, -80]} target={[-80, 2, 80]} onTeleport={onTeleport} />
+      
+      {/* Map Portal */}
+      {portalUsesLeft > 0 && <DimensionPortal position={[0, 4, 80]} onPortalEnter={onPortalEnter} portalUsesLeft={portalUsesLeft} />}
+
+      {mapType === 'apartment' && <ApartmentFurniture />}
     </group>
   );
 };
@@ -867,22 +1159,81 @@ const WeaponDrop = React.memo(({ id, type, position, onPickup }: any) => {
   );
 });
 
+// --- HEALTH DROP ---
+const HealthDrop = React.memo(({ id, position, onPickup }: any) => {
+  const ref = useRef<any>(null);
+  const posVec = useMemo(() => new THREE.Vector3(...position), [position]);
+  
+  useFrame((state, delta) => {
+    if (ref.current) {
+      ref.current.rotation.y += delta * 2;
+      ref.current.position.y = position[1] + Math.sin(state.clock.elapsedTime * 3) * 0.2;
+    }
+    if (playerState.pos.distanceTo(posVec) < 1.5) {
+      onPickup(id);
+    }
+  });
+
+  return (
+    <group ref={ref} position={position}>
+      <Box args={[0.4, 0.4, 0.4]}>
+        <meshStandardMaterial color="#00ff00" emissive="#00ff00" emissiveIntensity={0.8} />
+      </Box>
+      <Box args={[0.6, 0.15, 0.15]}>
+        <meshStandardMaterial color="#ffffff" />
+      </Box>
+      <Box args={[0.15, 0.6, 0.15]}>
+        <meshStandardMaterial color="#ffffff" />
+      </Box>
+    </group>
+  );
+});
+
 // --- GAME MANAGER ---
-const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCountdown, waveCountdown, setEnemiesRemaining, setWaveAnnouncement, setKillsInWave, killsInWave, setWeaponType }: any) => {
+const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCountdown, waveCountdown, setEnemiesRemaining, setWaveAnnouncement, setKillsInWave, killsInWave, setWeaponType, isTutorialActive, setHealth, tutorialStep, isTutorialHidden }: any) => {
   const [enemies, setEnemies] = useState<any[]>([]);
   const [weaponDrops, setWeaponDrops] = useState<any[]>([]);
+  const [healthDrops, setHealthDrops] = useState<any[]>([]);
   const killGoal = useMemo(() => 10 + (wave - 1) * 5, [wave]);
+
+  const hasSpawnedForStep = useRef<number | null>(null);
+
+  // Tutorial Spawning Logic
+  useEffect(() => {
+    if (!isTutorialActive) return;
+
+    if (!isTutorialHidden) {
+      setWeaponDrops([]);
+      setHealthDrops([]);
+      hasSpawnedForStep.current = null;
+      return;
+    }
+
+    if (hasSpawnedForStep.current === tutorialStep) return;
+
+    if (tutorialStep === 3) {
+      // Spawn a weapon drop near the player
+      const pos = playerState.pos.clone().add(new THREE.Vector3(5, 0, 5));
+      setWeaponDrops([{ id: 'tutorial-weapon', type: 'machinegun', pos: pos.toArray() }]);
+      hasSpawnedForStep.current = tutorialStep;
+    } else if (tutorialStep === 6) {
+      // Spawn a health drop near the player
+      const pos = playerState.pos.clone().add(new THREE.Vector3(-5, 0, 5));
+      setHealthDrops([{ id: 'tutorial-health', pos: pos.toArray() }]);
+      hasSpawnedForStep.current = tutorialStep;
+    }
+  }, [isTutorialActive, isTutorialHidden, tutorialStep]);
 
   // Wave Mode Logic
   useEffect(() => {
-    if (gameMode !== 'waves') return;
+    if (gameMode !== 'waves' || isTutorialActive) return;
     setEnemiesRemaining(killGoal);
     setKillsInWave(0);
     setEnemies([]);
     setWaveAnnouncement(`WAVE ${wave}`);
     soundManager.playWaveStart();
     setTimeout(() => setWaveAnnouncement(null), 3000);
-  }, [wave, killGoal, setEnemiesRemaining, setWaveAnnouncement, gameMode, setKillsInWave]);
+  }, [wave, killGoal, setEnemiesRemaining, setWaveAnnouncement, gameMode, setKillsInWave, isTutorialActive]);
 
   const killsInWaveRef = useRef(killsInWave);
   const enemiesLengthRef = useRef(enemies.length);
@@ -893,7 +1244,7 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
   }, [killsInWave, enemies.length]);
 
   useEffect(() => {
-    if (playerState.gameState !== 'playing' || gameMode !== 'waves') return;
+    if (playerState.gameState !== 'playing' || gameMode !== 'waves' || isTutorialActive) return;
     
     // Calculate how many more we need to spawn to reach the goal
     const totalActiveAndKilled = killsInWaveRef.current + enemiesLengthRef.current;
@@ -927,11 +1278,11 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
       });
     }, spawnRate);
     return () => clearInterval(interval);
-  }, [wave, killGoal, gameMode]);
+  }, [wave, killGoal, gameMode, isTutorialActive]);
 
   // Endless Mode Logic
   useEffect(() => {
-    if (playerState.gameState !== 'playing' || gameMode !== 'endless') return;
+    if (playerState.gameState !== 'playing' || gameMode !== 'endless' || isTutorialActive) return;
 
     const interval = setInterval(() => {
       setEnemies(prev => {
@@ -949,7 +1300,7 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
       });
     }, 2000);
     return () => clearInterval(interval);
-  }, [gameMode]);
+  }, [gameMode, isTutorialActive]);
 
   const handleDie = useCallback((id: number, isKill: boolean = true, pos?: THREE.Vector3) => {
     setEnemies(prev => prev.filter(e => e.id !== id));
@@ -957,10 +1308,15 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
     if (isKill) {
       setScore((s: number) => s + 10);
 
-      if (pos && Math.random() < 0.25) {
-        const types = ['shotgun', 'machinegun'];
-        const type = types[Math.floor(Math.random() * types.length)];
-        setWeaponDrops(prev => [...prev, { id: Date.now() + Math.random(), type, pos: pos.toArray() }]);
+      if (pos) {
+        const rand = Math.random();
+        if (rand < 0.20) {
+          const types = ['shotgun', 'machinegun'];
+          const type = types[Math.floor(Math.random() * types.length)];
+          setWeaponDrops(prev => [...prev, { id: Date.now() + Math.random(), type, pos: pos.toArray() }]);
+        } else if (rand > 0.85) {
+          setHealthDrops(prev => [...prev, { id: Date.now() + Math.random(), pos: pos.toArray() }]);
+        }
       }
 
       if (gameMode === 'waves') {
@@ -982,6 +1338,12 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
     setWeaponType(type);
     soundManager.playReload();
   }, [setWeaponType]);
+
+  const handleHealthPickup = useCallback((id: number) => {
+    setHealthDrops(prev => prev.filter(h => h.id !== id));
+    setHealth((h: number) => Math.min(100, h + 25));
+    soundManager.playPowerup();
+  }, [setHealth]);
 
   const isTransitioning = useRef(false);
 
@@ -1016,6 +1378,9 @@ const GameManager = ({ bloodSystem, gameMode, setScore, wave, setWave, setWaveCo
       ))}
       {weaponDrops.map(w => (
         <WeaponDrop key={w.id} id={w.id} type={w.type} position={w.pos} onPickup={handlePickup} />
+      ))}
+      {healthDrops.map(h => (
+        <HealthDrop key={h.id} id={h.id} position={h.pos} onPickup={handleHealthPickup} />
       ))}
     </>
   );
@@ -1361,56 +1726,122 @@ const MobileControls = ({ setGameState }: { setGameState: (state: 'menu' | 'play
 };
 
 // --- UI COMPONENTS ---
-const MainMenu = ({ onStart, highscore }: { onStart: (mode: 'endless' | 'waves') => void, highscore: number }) => (
-  <motion.div
-    initial={{ opacity: 0, scale: 0.9 }}
-    animate={{ opacity: 1, scale: 1 }}
-    exit={{ opacity: 0, y: -50 }}
-    transition={{ duration: 0.5, type: 'spring', bounce: 0.4 }}
-    className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md"
-  >
-    <motion.h1
-      initial={{ y: -50, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
-      className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-br from-red-500 to-purple-600 mb-4 drop-shadow-[0_0_20px_rgba(255,0,0,0.8)] tracking-widest text-center"
+// --- UI COMPONENTS ---
+const MainMenu = ({ onStart, onTutorial, highscore }: { onStart: (mode: 'endless' | 'waves') => void, onTutorial: () => void, highscore: number }) => {
+  const [infoMode, setInfoMode] = useState<'endless' | 'waves' | null>(null);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, y: -50 }}
+      transition={{ duration: 0.5, type: 'spring', bounce: 0.4 }}
+      className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md"
     >
-      CYBER ARENA
-    </motion.h1>
-    <motion.p
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ delay: 0.4 }}
-      className="text-red-400 text-xl mb-6 font-mono text-center tracking-widest"
-    >
-      HIGHSCORE: {highscore}
-    </motion.p>
-    <div className="flex flex-col md:flex-row gap-4">
-      <motion.button
-        whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(255, 0, 0, 0.8)" }}
-        whileTap={{ scale: 0.95 }}
-        initial={{ x: -50, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        transition={{ delay: 0.5, type: 'spring' }}
-        onClick={() => { soundManager.playMenuClick(); onStart('endless'); }}
-        className="px-6 py-3 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto"
+      <motion.h1
+        initial={{ y: -50, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ delay: 0.2, type: 'spring', stiffness: 200 }}
+        className="text-5xl md:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-br from-red-500 to-purple-600 mb-4 drop-shadow-[0_0_20px_rgba(255,0,0,0.8)] tracking-widest text-center"
       >
-        ENDLESS MODE
-      </motion.button>
-      <motion.button
-        whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(150, 0, 255, 0.8)" }}
-        whileTap={{ scale: 0.95 }}
-        initial={{ x: 50, opacity: 0 }}
-        animate={{ x: 0, opacity: 1 }}
-        transition={{ delay: 0.6, type: 'spring' }}
-        onClick={() => { soundManager.playMenuClick(); onStart('waves'); }}
-        className="px-6 py-3 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto"
+        CYBER ARENA
+      </motion.h1>
+      <motion.p
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.4 }}
+        className="text-red-400 text-xl mb-6 font-mono text-center tracking-widest"
       >
-        WAVE MODE
+        HIGHSCORE: {highscore}
+      </motion.p>
+      <div className="flex flex-col md:flex-row gap-4">
+        <div className="relative group">
+          <motion.button
+            whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(255, 0, 0, 0.8)" }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ x: -50, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            transition={{ delay: 0.5, type: 'spring' }}
+            onClick={() => { soundManager.playMenuClick(); onStart('endless'); }}
+            className="px-6 py-3 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto w-full md:w-auto"
+          >
+            ENDLESS MODE
+          </motion.button>
+          <button 
+            onClick={() => { soundManager.playMenuClick(); setInfoMode('endless'); }}
+            className="absolute -top-3 -right-3 w-8 h-8 bg-white/10 border border-white/20 rounded-full flex items-center justify-center text-white font-bold hover:bg-white/30 transition-colors z-40 pointer-events-auto"
+          >
+            ?
+          </button>
+        </div>
+
+        <div className="relative group">
+          <motion.button
+            whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(150, 0, 255, 0.8)" }}
+            whileTap={{ scale: 0.95 }}
+            initial={{ x: 50, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            transition={{ delay: 0.6, type: 'spring' }}
+            onClick={() => { soundManager.playMenuClick(); onStart('waves'); }}
+            className="px-6 py-3 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto w-full md:w-auto"
+          >
+            WAVE MODE
+          </motion.button>
+          <button 
+            onClick={() => { soundManager.playMenuClick(); setInfoMode('waves'); }}
+            className="absolute -top-3 -right-3 w-8 h-8 bg-white/10 border border-white/20 rounded-full flex items-center justify-center text-white font-bold hover:bg-white/30 transition-colors z-40 pointer-events-auto"
+          >
+            ?
+          </button>
+        </div>
+      </div>
+      
+      <motion.button
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.8 }}
+        onClick={() => { soundManager.playMenuClick(); onTutorial(); }}
+        className="mt-12 text-gray-500 hover:text-cyan-400 font-mono text-sm tracking-widest transition-colors uppercase border-b border-transparent hover:border-cyan-400 pb-1 cursor-pointer pointer-events-auto"
+      >
+        Replay Tutorial
       </motion.button>
-    </div>
-  </motion.div>
-);
+
+      <AnimatePresence>
+        {infoMode && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 flex items-center justify-center bg-black/90 p-8 pointer-events-auto"
+          >
+            <div className="bg-gray-900 border-2 border-white/20 p-8 rounded-2xl max-w-md w-full relative shadow-[0_0_50px_rgba(0,0,0,1)]">
+              <button 
+                onClick={() => setInfoMode(null)}
+                className="absolute top-4 right-4 text-gray-500 hover:text-white transition-colors text-2xl font-bold"
+              >
+                ×
+              </button>
+              <h2 className="text-3xl font-black mb-4 tracking-tighter uppercase italic text-white">
+                {infoMode === 'endless' ? 'Endless Mode' : 'Wave Mode'}
+              </h2>
+              <p className="text-gray-400 font-mono text-lg leading-relaxed">
+                {infoMode === 'endless' 
+                  ? "Survive as long as possible against an ever-growing horde of enemies. The difficulty increases over time. No breaks, just pure chaos."
+                  : "Defeat a specific number of enemies to clear a wave. After each wave, you get a short break to recover. New enemy types appear in later waves."}
+              </p>
+              <button 
+                onClick={() => setInfoMode(null)}
+                className="mt-8 w-full py-3 bg-white text-black font-black rounded-xl hover:bg-gray-200 transition-colors uppercase tracking-widest"
+              >
+                Got it
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+};
 
 const GameOver = ({ onRestart, onMenu, score, highscore }: { onRestart: () => void, onMenu: () => void, score: number, highscore: number }) => (
   <motion.div
@@ -1521,7 +1952,7 @@ const PowerupButton = ({ label, name, count, color, onClick }: any) => (
   </div>
 );
 
-const HUD = ({ health, score, ammo, isReloading, wave, enemiesRemaining, waveCountdown, waveAnnouncement, gameMode, killsInWave, weaponType, powerupCharges, onUsePowerup }: { health: number, score: number, ammo: number, isReloading: boolean, wave: number, enemiesRemaining: number, waveCountdown: number, waveAnnouncement: string | null, gameMode: 'endless' | 'waves', killsInWave: number, weaponType: string, powerupCharges: { health: number, ammo: number }, onUsePowerup: (type: 'health' | 'ammo') => void }) => {
+const HUD = ({ health, score, ammo, isReloading, wave, enemiesRemaining, waveCountdown, waveAnnouncement, gameMode, killsInWave, weaponType, powerupCharges, onUsePowerup, portalUsesLeft }: { health: number, score: number, ammo: number, isReloading: boolean, wave: number, enemiesRemaining: number, waveCountdown: number, waveAnnouncement: string | null, gameMode: 'endless' | 'waves', killsInWave: number, weaponType: string, powerupCharges: { health: number, ammo: number }, onUsePowerup: (type: 'health' | 'ammo') => void, portalUsesLeft: number }) => {
   const displayHealth = Math.round(health);
   const healthPercent = Math.max(0, Math.min(100, health));
   const killGoal = 10 + (wave - 1) * 5;
@@ -1815,10 +2246,20 @@ export default function ShooterGame() {
   const [ammo, setAmmo] = useState(30);
   const [isReloading, setIsReloading] = useState(false);
   const [gameState, setGameState] = useState<'menu' | 'playing' | 'gameover' | 'paused'>('menu');
+  const [currentMap, setCurrentMap] = useState<'city' | 'military' | 'factory' | 'apartment'>('city');
+  const [showMapName, setShowMapName] = useState(false);
+  const [portalTransition, setPortalTransition] = useState<'idle' | 'in' | 'out'>('idle');
+  const [portalUsesLeft, setPortalUsesLeft] = useState(5);
+  const isTeleportingRef = useRef(false);
   const [gameKey, setGameKey] = useState(0);
   const [damageFlash, setDamageFlash] = useState(false);
   const [score, setScore] = useState(0);
   const [highscore, setHighscore] = useState(() => parseInt(localStorage.getItem('cyber_arena_highscore') || '0', 10));
+  const [isTutorialActive, setIsTutorialActive] = useState(false);
+  const [isTutorialHidden, setIsTutorialHidden] = useState(false);
+  const tutorialSpawnPos = useRef<THREE.Vector3 | null>(null);
+  const [tutorialStep, setTutorialStep] = useState(0);
+  const [tutorialLanguage, setTutorialLanguage] = useState<'en' | 'de' | null>(null);
   const [gameMode, setGameMode] = useState<'endless' | 'waves'>('endless');
   const [wave, setWave] = useState(1);
   const [waveCountdown, setWaveCountdown] = useState(0);
@@ -1843,6 +2284,16 @@ export default function ShooterGame() {
     }
   }, [powerupCharges]);
 
+  const updateHighscore = useCallback(() => {
+    setHighscore(prev => {
+      if (score > prev) {
+        localStorage.setItem('cyber_arena_highscore', score.toString());
+        return score;
+      }
+      return prev;
+    });
+  }, [score]);
+
   const handleTeleport = (target: [number, number, number]) => {
     if (playerBodyRef.current) {
       playerBodyRef.current.setTranslation({ x: target[0], y: target[1], z: target[2] }, true);
@@ -1852,17 +2303,12 @@ export default function ShooterGame() {
 
   useEffect(() => {
     playerState.gameState = gameState;
-    if (health <= 0 && gameState === 'playing') {
+    if (health <= 0 && gameState === 'playing' && !isTutorialActive) {
       setGameState('gameover');
       soundManager.playGameOver();
-      if (score > highscore) {
-        setHighscore(score);
-        localStorage.setItem('cyber_arena_highscore', score.toString());
-      }
-      // Save score to local storage only
-      localStorage.setItem('cyber_arena_highscore', score.toString());
+      updateHighscore();
     }
-  }, [health, gameState, score, highscore]);
+  }, [health, gameState, updateHighscore, isTutorialActive]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1945,7 +2391,54 @@ export default function ShooterGame() {
     };
   }, [gameState]);
 
-  const startGame = (mode: 'endless' | 'waves' = 'endless') => {
+  useEffect(() => {
+    if (gameState === 'playing') {
+      setShowMapName(true);
+      const t = setTimeout(() => setShowMapName(false), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [currentMap, gameState]);
+
+  const handlePortalEnter = useCallback(() => {
+    if (isTeleportingRef.current || portalUsesLeft <= 0) return;
+    
+    isTeleportingRef.current = true;
+    setPortalUsesLeft(prev => prev - 1);
+    setPortalTransition('in');
+    
+    try {
+      soundManager.playPowerup(); // Play a sound for feedback
+    } catch (e) {
+      console.error(e);
+    }
+    
+    setTimeout(() => {
+      try {
+        const mapTypes: ('city' | 'military' | 'factory' | 'apartment')[] = ['city', 'military', 'factory', 'apartment'];
+        setCurrentMap(current => {
+          const others = mapTypes.filter(m => m !== current);
+          return others[Math.floor(Math.random() * others.length)];
+        });
+        if (playerBodyRef.current) {
+          playerBodyRef.current.setTranslation({ x: 0, y: 5, z: 0 }, true);
+          playerBodyRef.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        }
+      } catch (err) {
+        console.error("Error during teleport:", err);
+      } finally {
+        setPortalTransition('out');
+        
+        setTimeout(() => {
+          setPortalTransition('idle');
+          isTeleportingRef.current = false;
+        }, 1000);
+      }
+    }, 1500);
+  }, [portalUsesLeft]);
+
+  const startGame = (mode: 'endless' | 'waves' = 'endless', forceTutorial = false) => {
+    const mapTypes: ('city' | 'military' | 'factory' | 'apartment')[] = ['city', 'military', 'factory', 'apartment'];
+    setCurrentMap(mapTypes[Math.floor(Math.random() * mapTypes.length)]);
     soundManager.init();
     setGameMode(mode);
     setScore(0);
@@ -1972,8 +2465,79 @@ export default function ShooterGame() {
     setEnemiesRemaining(0);
     setKillsInWave(0);
     setWeaponType('pistol');
+    setPortalUsesLeft(5);
+    
+    const tutorialCompleted = localStorage.getItem('cyber_arena_tutorial_completed') === 'true';
+    if (!tutorialCompleted || forceTutorial) {
+      setIsTutorialActive(true);
+      setIsTutorialHidden(false);
+      setTutorialStep(0);
+      setTutorialLanguage(null);
+    }
+    
     setGameState('playing');
   };
+
+  // Set tutorial spawn position when tutorial is hidden for an action step
+  useEffect(() => {
+    if (isTutorialActive && isTutorialHidden) {
+      if (tutorialStep === 3) {
+        tutorialSpawnPos.current = playerState.pos.clone().add(new THREE.Vector3(5, 0, 5));
+      } else if (tutorialStep === 6) {
+        tutorialSpawnPos.current = playerState.pos.clone().add(new THREE.Vector3(-5, 0, 5));
+      } else {
+        tutorialSpawnPos.current = null;
+      }
+    }
+  }, [isTutorialActive, isTutorialHidden, tutorialStep]);
+
+  // Tutorial Action Detection
+  useEffect(() => {
+    if (!isTutorialActive || !isTutorialHidden) return;
+
+    const interval = setInterval(() => {
+      let completed = false;
+      const currentTime = performance.now() / 1000;
+
+      switch (tutorialStep) {
+        case 1: // Movement
+          if (inputRef.move.x !== 0 || inputRef.move.y !== 0) completed = true;
+          break;
+        case 2: // Shooting
+          if (inputRef.justShot) completed = true;
+          break;
+        case 3: // Weapon Pickup
+          if (playerState.weapon === 'machinegun') completed = true;
+          break;
+        case 4: // Reloading
+          if (playerState.isReloading) completed = true;
+          break;
+        case 5: // Abilities
+          // Check if either Q or E cooldown was triggered (meaning the ability was used)
+          if (playerState.abilityCooldowns.q > currentTime || playerState.abilityCooldowns.e > currentTime) completed = true;
+          break;
+        case 6: // Health Pickup
+          if (playerState.health > 99) {
+             // If health is already 100, we check if they are near the spawn point
+             if (tutorialSpawnPos.current && playerState.pos.distanceTo(tutorialSpawnPos.current) < 2) completed = true;
+          }
+          break;
+      }
+
+      if (completed) {
+        clearInterval(interval);
+        soundManager.playPowerup();
+        
+        // Wait 2 seconds before showing the next step
+        setTimeout(() => {
+          setIsTutorialHidden(false);
+          setTutorialStep(s => s + 1);
+        }, 2000);
+      }
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [isTutorialActive, isTutorialHidden, tutorialStep]);
 
   return (
     <div className="w-full h-screen bg-black overflow-hidden relative select-none cursor-crosshair">
@@ -1987,11 +2551,44 @@ export default function ShooterGame() {
       </div>
 
       <AnimatePresence mode="wait">
-        {gameState === 'menu' && <MainMenu key="menu" onStart={startGame} highscore={highscore} />}
-        {gameState === 'paused' && <PauseMenu key="paused" onResume={() => setGameState('playing')} onRestart={() => startGame(gameMode)} onQuit={() => setGameState('menu')} />}
-        {gameState === 'gameover' && <GameOver key="gameover" onRestart={() => startGame(gameMode)} onMenu={() => setGameState('menu')} score={score} highscore={highscore} />}
+        {isTutorialActive && (
+          <TutorialOverlay 
+            key="tutorial"
+            step={tutorialStep}
+            setStep={setTutorialStep}
+            language={tutorialLanguage}
+            setLanguage={setTutorialLanguage}
+            isHidden={isTutorialHidden}
+            setIsHidden={setIsTutorialHidden}
+            onComplete={() => {
+              setIsTutorialActive(false);
+              localStorage.setItem('cyber_arena_tutorial_completed', 'true');
+              soundManager.playWaveStart();
+            }} 
+            onSkip={() => {
+              setIsTutorialActive(false);
+              setGameState('menu');
+              soundManager.playMenuClick();
+            }}
+          />
+        )}
+        {gameState === 'menu' && <MainMenu key="menu" onStart={startGame} onTutorial={() => startGame('endless', true)} highscore={highscore} />}
+        {gameState === 'paused' && (
+          <PauseMenu 
+            key="paused" 
+            onResume={() => setGameState('playing')} 
+            onRestart={() => { updateHighscore(); startGame(gameMode); }} 
+            onQuit={() => { updateHighscore(); setGameState('menu'); }} 
+          />
+        )}
+        {gameState === 'gameover' && <GameOver key="gameover" onRestart={() => startGame(gameMode)} onMenu={() => { updateHighscore(); setGameState('menu'); }} score={score} highscore={highscore} />}
         {gameState === 'playing' && (
-          <>
+          <motion.div 
+            key="playing-hud"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
             <HUD 
               key="hud" 
               health={health} 
@@ -2007,24 +2604,75 @@ export default function ShooterGame() {
               weaponType={weaponType} 
               powerupCharges={powerupCharges}
               onUsePowerup={handleUsePowerup}
+              portalUsesLeft={portalUsesLeft}
             />
             <Minimap />
-          </>
+            {showMapName && (
+              <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 z-40 pointer-events-none">
+                <h1 className="text-6xl md:text-8xl font-black text-white tracking-widest uppercase drop-shadow-[0_0_15px_rgba(255,255,255,0.8)] animate-pulse">
+                  {currentMap}
+                </h1>
+              </div>
+            )}
+          </motion.div>
         )}
       </AnimatePresence>
       {damageFlash && <div className="absolute inset-0 bg-red-600/40 pointer-events-none z-20 animate-pulse" />}
       {isReloading && <div className="absolute inset-0 bg-yellow-500/30 pointer-events-none z-20 animate-pulse" />}
       
+      <div 
+        className={`absolute inset-0 z-50 flex items-center justify-center bg-fuchsia-900/90 backdrop-blur-lg transition-opacity duration-1000 pointer-events-none ${
+          portalTransition === 'in' ? 'opacity-100' : 'opacity-0'
+        }`}
+      >
+        {portalTransition !== 'idle' && (
+          <div className="flex flex-col items-center">
+            <div className="w-16 h-16 border-4 border-fuchsia-400 border-t-fuchsia-100 rounded-full animate-spin mb-4"></div>
+            <h2 className="text-3xl font-black text-white tracking-widest animate-pulse">WARPING DIMENSIONS...</h2>
+          </div>
+        )}
+      </div>
+      
       {useMemo(() => (
         <Canvas shadows camera={{ position: [0, 35, 15], fov: 40 }}>
-          <color attach="background" args={['#0a0a1a']} />
-          <fog attach="fog" args={['#0a0a1a', 20, 80]} />
-          <ambientLight intensity={1.5} />
-          <directionalLight position={[20, 40, 20]} castShadow intensity={3} color="#ffffff" />
-          <pointLight position={[0, 20, 0]} intensity={4} color="#ff0055" distance={80} />
-
           <Physics gravity={[0, -30, 0]}>
-            <Arena onTeleport={handleTeleport} bloodSystem={bloodSystem} />
+            {currentMap === 'city' && (
+              <>
+                <color attach="background" args={['#111111']} />
+                <fog attach="fog" args={['#111111', 20, 80]} />
+                <ambientLight intensity={2.0} />
+                <directionalLight position={[20, 40, 20]} castShadow intensity={3} color="#ffddaa" />
+                <pointLight position={[0, 20, 0]} intensity={2} color="#ff0000" distance={80} />
+              </>
+            )}
+            {currentMap === 'military' && (
+              <>
+                <color attach="background" args={['#050a05']} />
+                <fog attach="fog" args={['#050a05', 10, 60]} />
+                <ambientLight intensity={1.5} />
+                <directionalLight position={[20, 40, 20]} castShadow intensity={2} color="#aaffaa" />
+                <pointLight position={[0, 20, 0]} intensity={4} color="#00ff00" distance={100} />
+              </>
+            )}
+            {currentMap === 'factory' && (
+              <>
+                <color attach="background" args={['#1a0a00']} />
+                <fog attach="fog" args={['#1a0a00', 15, 70]} />
+                <ambientLight intensity={2.0} />
+                <directionalLight position={[20, 40, 20]} castShadow intensity={3.5} color="#ffaaaa" />
+                <pointLight position={[0, 20, 0]} intensity={5} color="#ff4400" distance={90} />
+              </>
+            )}
+            {currentMap === 'apartment' && (
+              <>
+                <color attach="background" args={['#1a1a2a']} />
+                <fog attach="fog" args={['#1a1a2a', 20, 90]} />
+                <ambientLight intensity={2.5} />
+                <directionalLight position={[20, 40, 20]} castShadow intensity={3} color="#ffffff" />
+                <pointLight position={[0, 20, 0]} intensity={3} color="#aaaaff" distance={100} />
+              </>
+            )}
+            <Arena onTeleport={handleTeleport} bloodSystem={bloodSystem} mapType={currentMap} onPortalEnter={handlePortalEnter} portalUsesLeft={portalUsesLeft} />
             <BulletManager bloodSystem={bloodSystem} />
             {gameState === 'playing' && (
               <group key={gameKey}>
@@ -2048,6 +2696,10 @@ export default function ShooterGame() {
                   setKillsInWave={setKillsInWave}
                   killsInWave={killsInWave}
                   setWeaponType={setWeaponType}
+                  isTutorialActive={isTutorialActive}
+                  setHealth={setHealth}
+                  tutorialStep={tutorialStep}
+                  isTutorialHidden={isTutorialHidden}
                 />
                 {Array.from({ length: Math.min(5, Math.floor(Math.max(score, highscore) / 100)) }).map((_, i, arr) => (
                   <Drone key={`drone-${i}`} index={i} totalDrones={arr.length} />
@@ -2058,7 +2710,7 @@ export default function ShooterGame() {
 
           <BloodParticles ref={bloodSystem} />
         </Canvas>
-      ), [gameState, gameKey, gameMode, wave, killsInWave, score, highscore, waveCountdown])}
+      ), [gameState, gameKey, gameMode, wave, killsInWave, score, highscore, waveCountdown, currentMap, portalUsesLeft, isTutorialActive, isTutorialHidden, tutorialStep])}
 
       {gameState === 'playing' && <MobileControls setGameState={setGameState} />}
     </div>
