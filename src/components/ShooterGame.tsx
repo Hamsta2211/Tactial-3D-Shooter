@@ -115,6 +115,15 @@ const TutorialOverlay = ({ onComplete, onSkip, step, setStep, language, setLangu
             </button>
           </div>
         </div>
+
+        {/* Language Toggle Button */}
+        <button 
+          onClick={() => { setLanguage(language === 'en' ? 'de' : 'en'); soundManager.playMenuClick(); }}
+          className="absolute bottom-4 right-4 w-10 h-10 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full flex items-center justify-center text-[10px] font-black text-gray-500 hover:text-cyan-400 transition-all uppercase tracking-tighter"
+          title={language === 'en' ? 'Switch to German' : 'Auf Englisch wechseln'}
+        >
+          {language === 'en' ? 'DE' : 'EN'}
+        </button>
       </motion.div>
     </div>
   );
@@ -1727,7 +1736,7 @@ const MobileControls = ({ setGameState }: { setGameState: (state: 'menu' | 'play
 
 // --- UI COMPONENTS ---
 // --- UI COMPONENTS ---
-const MainMenu = ({ onStart, onTutorial, highscore }: { onStart: (mode: 'endless' | 'waves') => void, onTutorial: () => void, highscore: number }) => {
+const MainMenu = ({ onStart, onTutorial, highscore, language, setLanguage }: { onStart: (mode: 'endless' | 'waves') => void, onTutorial: () => void, highscore: number, language: 'en' | 'de' | null, setLanguage: (l: 'en' | 'de') => void }) => {
   const [infoMode, setInfoMode] = useState<'endless' | 'waves' | null>(null);
 
   return (
@@ -1755,45 +1764,49 @@ const MainMenu = ({ onStart, onTutorial, highscore }: { onStart: (mode: 'endless
         HIGHSCORE: {highscore}
       </motion.p>
       <div className="flex flex-col md:flex-row gap-4">
-        <div className="relative group">
-          <motion.button
-            whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(255, 0, 0, 0.8)" }}
-            whileTap={{ scale: 0.95 }}
-            initial={{ x: -50, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            transition={{ delay: 0.5, type: 'spring' }}
+        <motion.div 
+          className="relative group"
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          initial={{ x: -50, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          transition={{ delay: 0.5, type: 'spring' }}
+        >
+          <button
             onClick={() => { soundManager.playMenuClick(); onStart('endless'); }}
-            className="px-6 py-3 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto w-full md:w-auto"
+            className="px-6 py-3 bg-gradient-to-r from-red-900 to-red-700 text-white font-black text-xl rounded-xl border-2 border-red-500 cursor-pointer pointer-events-auto w-full md:w-auto shadow-[0_0_20px_rgba(255,0,0,0.3)] group-hover:shadow-[0_0_30px_rgba(255,0,0,0.8)] transition-all"
           >
             ENDLESS MODE
-          </motion.button>
+          </button>
           <button 
-            onClick={() => { soundManager.playMenuClick(); setInfoMode('endless'); }}
+            onClick={(e) => { e.stopPropagation(); soundManager.playMenuClick(); setInfoMode('endless'); }}
             className="absolute -top-3 -right-3 w-8 h-8 bg-white/10 border border-white/20 rounded-full flex items-center justify-center text-white font-bold hover:bg-white/30 transition-colors z-40 pointer-events-auto"
           >
             ?
           </button>
-        </div>
+        </motion.div>
 
-        <div className="relative group">
-          <motion.button
-            whileHover={{ scale: 1.05, boxShadow: "0px 0px 30px rgba(150, 0, 255, 0.8)" }}
-            whileTap={{ scale: 0.95 }}
-            initial={{ x: 50, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            transition={{ delay: 0.6, type: 'spring' }}
+        <motion.div 
+          className="relative group"
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          initial={{ x: 50, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          transition={{ delay: 0.6, type: 'spring' }}
+        >
+          <button
             onClick={() => { soundManager.playMenuClick(); onStart('waves'); }}
-            className="px-6 py-3 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto w-full md:w-auto"
+            className="px-6 py-3 bg-gradient-to-r from-purple-900 to-purple-700 text-white font-black text-xl rounded-xl border-2 border-purple-500 cursor-pointer pointer-events-auto w-full md:w-auto shadow-[0_0_20px_rgba(150,0,255,0.3)] group-hover:shadow-[0_0_30px_rgba(150,0,255,0.8)] transition-all"
           >
             WAVE MODE
-          </motion.button>
+          </button>
           <button 
-            onClick={() => { soundManager.playMenuClick(); setInfoMode('waves'); }}
+            onClick={(e) => { e.stopPropagation(); soundManager.playMenuClick(); setInfoMode('waves'); }}
             className="absolute -top-3 -right-3 w-8 h-8 bg-white/10 border border-white/20 rounded-full flex items-center justify-center text-white font-bold hover:bg-white/30 transition-colors z-40 pointer-events-auto"
           >
             ?
           </button>
-        </div>
+        </motion.div>
       </div>
       
       <motion.button
@@ -1805,6 +1818,30 @@ const MainMenu = ({ onStart, onTutorial, highscore }: { onStart: (mode: 'endless
       >
         Replay Tutorial
       </motion.button>
+
+      {/* Main Language Toggle */}
+      <div className="absolute bottom-8 right-8 flex gap-2 pointer-events-auto">
+        <button 
+          onClick={() => { setLanguage('en'); soundManager.playMenuClick(); }}
+          className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-black transition-all border ${
+            language === 'en' 
+              ? 'bg-cyan-500 text-black border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.5)]' 
+              : 'bg-white/5 text-gray-500 border-white/10 hover:bg-white/10'
+          }`}
+        >
+          EN
+        </button>
+        <button 
+          onClick={() => { setLanguage('de'); soundManager.playMenuClick(); }}
+          className={`w-10 h-10 rounded-full flex items-center justify-center text-xs font-black transition-all border ${
+            language === 'de' 
+              ? 'bg-fuchsia-500 text-black border-fuchsia-400 shadow-[0_0_15px_rgba(217,70,239,0.5)]' 
+              : 'bg-white/5 text-gray-500 border-white/10 hover:bg-white/10'
+          }`}
+        >
+          DE
+        </button>
+      </div>
 
       <AnimatePresence>
         {infoMode && (
@@ -1834,6 +1871,15 @@ const MainMenu = ({ onStart, onTutorial, highscore }: { onStart: (mode: 'endless
                 className="mt-8 w-full py-3 bg-white text-black font-black rounded-xl hover:bg-gray-200 transition-colors uppercase tracking-widest"
               >
                 Got it
+              </button>
+
+              {/* Language Toggle Button */}
+              <button 
+                onClick={() => { setLanguage(language === 'en' ? 'de' : 'en'); soundManager.playMenuClick(); }}
+                className="absolute bottom-4 right-4 w-10 h-10 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full flex items-center justify-center text-[10px] font-black text-gray-500 hover:text-cyan-400 transition-all uppercase tracking-tighter"
+                title={language === 'en' ? 'Switch to German' : 'Auf Englisch wechseln'}
+              >
+                {language === 'en' ? 'DE' : 'EN'}
               </button>
             </div>
           </motion.div>
@@ -2572,7 +2618,16 @@ export default function ShooterGame() {
             }}
           />
         )}
-        {gameState === 'menu' && <MainMenu key="menu" onStart={startGame} onTutorial={() => startGame('endless', true)} highscore={highscore} />}
+        {gameState === 'menu' && (
+          <MainMenu 
+            key="menu" 
+            onStart={startGame} 
+            onTutorial={() => startGame('endless', true)} 
+            highscore={highscore} 
+            language={tutorialLanguage}
+            setLanguage={setTutorialLanguage}
+          />
+        )}
         {gameState === 'paused' && (
           <PauseMenu 
             key="paused" 
